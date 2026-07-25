@@ -32,8 +32,8 @@ cp "$SRCDIR/vmlinuz" "$ISOROOT/boot/vmlinuz"
 cp "$SRCDIR/installer-initrd.img" "$ISOROOT/boot/installer-initrd.img"
 cp "$(dirname "$(realpath "$0")")/grub.cfg" "$ISOROOT/boot/grub/grub.cfg"
 
-log "grub-mkrescue -> $OUTDIR/projekt-lods-installer.iso"
-grub-mkrescue -o "$OUTDIR/projekt-lods-installer.iso" "$ISOROOT" >&2
+log "grub-mkrescue -> $OUTDIR/lods-installer.iso"
+grub-mkrescue -o "$OUTDIR/lods-installer.iso" "$ISOROOT" >&2
 
 log "done."
-du -h "$OUTDIR/projekt-lods-installer.iso"
+du -h "$OUTDIR/lods-installer.iso"

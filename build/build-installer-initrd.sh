@@ -184,7 +184,7 @@ chroot "$ROOTFS" systemctl enable ssh.service
 # getty/sshd/lods-installer all see the real value, not a placeholder.
 cat > "$ROOTFS/etc/systemd/system/lods-random-hostname.service" <<'EOF'
 [Unit]
-Description=projekt-lods random hostname
+Description=lods random hostname
 Before=getty@tty1.service serial-getty@ttyS0.service ssh.service lods-installer.service
 DefaultDependencies=no
 Conflicts=shutdown.target
@@ -207,22 +207,22 @@ chroot "$ROOTFS" systemctl enable lods-random-hostname.service
 # keyboard-configuration` interactively) -- kbd is installed for exactly
 # this, on demand, not on every boot.
 
-log "[7/10] installing the projekt-lods installer package + service unit"
+log "[7/10] installing the lods installer package + service unit"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mkdir -p "$ROOTFS/opt/projekt-lods"
-cp -a "$REPO_ROOT/installer" "$ROOTFS/opt/projekt-lods/installer"
-chmod +x "$ROOTFS/opt/projekt-lods/installer/main.py"
+mkdir -p "$ROOTFS/opt/lods"
+cp -a "$REPO_ROOT/installer" "$ROOTFS/opt/lods/installer"
+chmod +x "$ROOTFS/opt/lods/installer/main.py"
 
 cat > "$ROOTFS/etc/systemd/system/lods-installer.service" <<'EOF'
 [Unit]
-Description=projekt-lods installer
+Description=lods installer
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/python3 /opt/projekt-lods/installer/main.py
+ExecStart=/usr/bin/python3 /opt/lods/installer/main.py
 StandardOutput=journal+console
 StandardError=journal+console
 

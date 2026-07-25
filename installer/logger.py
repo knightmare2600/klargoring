@@ -1,11 +1,11 @@
-"""Logging setup. Per plan.txt: log everything to /var/log/projekt-lods/install.log,
+"""Logging setup. Per plan.txt: log everything to /var/log/lods/install.log,
 in addition to stdout (which lods-installer.service already sends to both the
 journal and the console).
 """
 import logging
 import os
 
-LOG_PATH = "/var/log/projekt-lods/install.log"
+LOG_PATH = "/var/log/lods/install.log"
 
 
 def setup():

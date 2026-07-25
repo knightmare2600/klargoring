@@ -5,7 +5,7 @@ systemd unit enabled to run it once the installed system is fully up.
 import subprocess
 
 SERVICE = """[Unit]
-Description=projekt-lods first-boot script
+Description=lods first-boot script
 After=network-online.target
 Wants=network-online.target
 

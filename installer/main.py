@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""projekt-lods installer entrypoint.
+"""lods installer entrypoint.
 
 Flow (plan.txt "Installer Execution Flow" / initrd-plan.txt Stage 2):
   load TOML -> validate -> detect hardware -> confirm-wipe gate ->

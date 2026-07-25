@@ -83,7 +83,7 @@ installer/          the Stage 2 installer, runs inside the booted initrd
   main.py              orchestrator: load TOML -> ... -> reboot
   config.py            TOML load + validation (parses the TOML directly,
                         no schema translation)
-  logger.py            logs to /var/log/projekt-lods/install.log + console
+  logger.py            logs to /var/log/lods/install.log + console
   storage/
     detect.py            disk detection/validation (size floor, not mounted)
     partition.py         sgdisk GPT layout: bios_boot + ESP + zfs, per disk
@@ -151,7 +151,7 @@ bash build/build-installer-iso.sh /path/to/initrd-output-dir /path/to/iso-output
 No root needed for this step. Needs `grub-pc-bin`, `grub-efi-amd64-bin`,
 `xorriso`, and `mtools` (`grub-mkrescue`'s own dependencies) on the build
 host. Produces a single hybrid BIOS+UEFI ISO
-(`projekt-lods-installer.iso`) — the same disc image boots on both old
+(`lods-installer.iso`) — the same disc image boots on both old
 BIOS hardware and modern UEFI systems.
 
 Both build steps also run as a manually-triggered GitHub Actions workflow
@@ -159,7 +159,7 @@ Both build steps also run as a manually-triggered GitHub Actions workflow
 the target Debian suite, e.g. `trixie`/`bookworm`, and optionally a
 release tag). It builds the initrd+kernel and the ISO as separate jobs,
 then publishes all four files (`installer-initrd.img`, `vmlinuz`,
-`KERNEL_VERSION`, `projekt-lods-installer.iso`) as assets on a GitHub
+`KERNEL_VERSION`, `lods-installer.iso`) as assets on a GitHub
 Release — tagged `lods-<date>-<suite>-<run-number>` if you leave the tag
 input blank, or whatever you pass in.
 
@@ -193,7 +193,7 @@ hardcode a single site's URL into a shared iPXE menu entry.
 
 ## Booting via ISO
 
-Burn/mount `projekt-lods-installer.iso` and boot it. Unlike the iPXE path
+Burn/mount `lods-installer.iso` and boot it. Unlike the iPXE path
 (where `menu.ipxe` already resolves the real `toml_url=` per site), a
 generic ISO can't know that URL in advance — its GRUB menu
 (`build/grub.cfg`) ships two entries, "local console (tty1)" and "serial

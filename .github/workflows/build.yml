@@ -74,7 +74,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-iso-${{ inputs.debian_suite }}
-          path: iso-output/projekt-lods-installer.iso
+          path: iso-output/lods-installer.iso
           if-no-files-found: error
           retention-days: 14
 
@@ -112,9 +112,9 @@ jobs:
         run: |
           gh release create "${{ steps.tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
-            --title "projekt-lods (${{ inputs.debian_suite }}, build #${{ github.run_number }})" \
+            --title "lods (${{ inputs.debian_suite }}, build #${{ github.run_number }})" \
             --notes "Automated build via workflow_dispatch (debian_suite=${{ inputs.debian_suite }})." \
             initrd-output/installer-initrd.img \
             initrd-output/vmlinuz \
             initrd-output/KERNEL_VERSION \
-            iso-output/projekt-lods-installer.iso
+            iso-output/lods-installer.iso
