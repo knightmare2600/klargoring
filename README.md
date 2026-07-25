@@ -102,7 +102,9 @@ build/
 
 .github/workflows/
   build.yml            manual workflow_dispatch: builds the initrd+kernel,
-                        then the ISO, as separate jobs; uploads both
+                        then the ISO, then publishes both as a GitHub
+                        Release (tag auto-generated from date + suite +
+                        run number, or pass your own)
 
 examples/
   answer.toml          generic template -- real per-site files are never
@@ -146,9 +148,12 @@ BIOS hardware and modern UEFI systems.
 
 Both build steps also run as a manually-triggered GitHub Actions workflow
 (`.github/workflows/build.yml`, `workflow_dispatch` only — prompts for
-the target Debian suite, e.g. `trixie`/`bookworm`, then builds the
-initrd+kernel and the ISO as separate jobs, uploading both as workflow
-artifacts).
+the target Debian suite, e.g. `trixie`/`bookworm`, and optionally a
+release tag). It builds the initrd+kernel and the ISO as separate jobs,
+then publishes all four files (`installer-initrd.img`, `vmlinuz`,
+`KERNEL_VERSION`, `projekt-lods-installer.iso`) as assets on a GitHub
+Release — tagged `lods-<date>-<suite>-<run-number>` if you leave the tag
+input blank, or whatever you pass in.
 
 ## Booting via iPXE
 

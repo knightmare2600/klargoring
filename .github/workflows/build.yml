@@ -12,9 +12,14 @@ on:
         description: "Debian suite to debootstrap (e.g. trixie, bookworm)"
         required: true
         default: "trixie"
+      release_tag:
+        description: "Release tag (blank = auto-generate from date + suite + run number)"
+        required: false
+        default: ""
 
+# contents: write is needed for the publish-release job (gh release create).
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-initrd:
@@ -72,3 +77,44 @@ jobs:
           path: iso-output/projekt-lods-installer.iso
           if-no-files-found: error
           retention-days: 14
+
+  publish-release:
+    needs: [build-initrd, build-iso]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download initrd + kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-initrd-${{ inputs.debian_suite }}
+          path: initrd-output
+
+      - name: Download ISO artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-iso-${{ inputs.debian_suite }}
+          path: iso-output
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          TAG="${{ inputs.release_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="lods-$(date -u +%Y%m%d)-${{ inputs.debian_suite }}-${{ github.run_number }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # gh is preinstalled on GitHub-hosted runners. --repo is passed
+      # explicitly so this doesn't need a checkout step just to give gh a
+      # git remote to infer the repo from.
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --title "projekt-lods (${{ inputs.debian_suite }}, build #${{ github.run_number }})" \
+            --notes "Automated build via workflow_dispatch (debian_suite=${{ inputs.debian_suite }})." \
+            initrd-output/installer-initrd.img \
+            initrd-output/vmlinuz \
+            initrd-output/KERNEL_VERSION \
+            iso-output/projekt-lods-installer.iso
