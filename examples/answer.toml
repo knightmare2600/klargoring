@@ -1,0 +1,30 @@
+# Example projekt-lods / Proxmox answer file. This is a generic template
+# (see plan.txt "Input Format") -- not a real site's file. Real per-site
+# files live on the provisioning server as bootstrap/web/proxmox/<SITE>-answer.toml
+# and are fetched dynamically by menu.ipxe, never checked in here.
+
+[global]
+keyboard = "en-gb"
+country = "gb"
+fqdn = "pve-install.example.internal"
+mailto = "root@example.internal"
+timezone = "Europe/London"
+
+root-password-hashed = "$6$replace-me-with-a-real-hash$..."
+
+root-ssh-keys = [
+  "ssh-rsa AAAA...replace-with-a-real-key... user@host"
+]
+
+[network]
+source = "from-dhcp"
+
+[disk-setup]
+filesystem = "zfs"
+zfs.raid = "raid1"
+disk-list = ["sda", "sdb"]
+
+[first-boot]
+source = "from-url"
+ordering = "fully-up"
+url = "http://192.168.139.50/proxmox/first-boot.sh"

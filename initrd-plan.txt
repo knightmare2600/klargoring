@@ -1,0 +1,841 @@
+Projekt Lods — Installer-Initrd Build Plan
+===========================================
+
+Status: addendum to plan.txt. plan.txt specifies the overall installer
+architecture and the TOML contract; this document specifies HOW that
+installer gets delivered and run as a PXE-booted initrd, per Robert's
+two requirements:
+
+  1. An initrd, built via debootstrap, that is itself a self-contained
+     Proxmox/ZFS installer — and which runs debootstrap A SECOND TIME,
+     from inside itself, against the target disks, to lay down Debian
+     Trixie + the Proxmox repo.
+  2. That initrd carries wget and curl so it can fetch the answer TOML
+     from a URL passed on the kernel command line.
+
+Relationship to testing_notes.txt
+----------------------------------
+The debootstrap run captured in testing_notes.txt (debootstrap stable
+-> /stable-chroot, then chroot in and apt-get install
+initramfs-tools/dracut-install/busybox/zfs-initramfs/python3/wget/curl)
+is the right raw material but the wrong assembly method. update-initramfs
+inside that chroot builds a *root-finding* initrd (mkinitramfs's job:
+locate a real root filesystem by UUID/LABEL and pivot to it). That is
+the tool used to boot an ALREADY-INSTALLED system, not to build a live
+installer that creates the root filesystem from nothing. Per Robert's
+decision, this plan does NOT use initramfs-tools/dracut hook machinery
+for the installer initrd itself. Confirmed in logs: debootstrap 1.0.141
+already bootstraps "stable" cleanly against deb.debian.org, with valid
+Release signature — the same binary handles "trixie" as a suite name
+(plan.txt already specifies Trixie as the target), so no debootstrap
+version concern here.
+
+Relationship to the blog article (entek.org.uk)
+-------------------------------------------------
+That article covers building a disk-resident Debian VM: qemu-img +
+qemu-nbd, parted, mkfs/mkswap, debootstrap --include=..., bind-mount
+/dev /proc /sys, chroot, fstab-by-UUID, grub-install, cleanup, unmount,
+disconnect NBD. None of that is about building an initrd — it is,
+however, an almost exact template for STAGE B below (the part that
+runs *inside* the booted installer, against the real target disks,
+substituting NBD-in-qcow2 for /dev/sda /dev/sdb and ext4 for a ZFS
+pool). Two deltas already known from plan.txt vs. the article:
+  - plan.txt's disk layout has no swap partition (EFI + BIOS-boot +
+    ZFS only, per-disk, mirrored). The article's swap partition is
+    dropped.
+  - The article benchmarked preseed as ~22% faster than debootstrap
+    automation for a plain Debian VM. Not relevant here — the driver
+    for this project isn't installer speed, it's replicating Proxmox's
+    own non-partman install architecture (plan.txt, "Design
+    philosophy"), which preseed/d-i cannot do.
+
+Two debootstrap passes — do not conflate them
+-----------------------------------------------
+Pass A (build time, on your build host, e.g. knight-t101):
+  debootstrap trixie <installer-rootfs-dir> http://deb.debian.org/debian/
+  This produces the CONTENTS of the initrd — the live installer
+  environment. Done once per initrd build/release, not on the target
+  node.
+
+Pass B (run time, inside the booted initrd, on the target node):
+  debootstrap trixie /target http://deb.debian.org/debian
+  This is what actually provisions the Proxmox node's root filesystem.
+  Runs from Python via subprocess, driven by parsed TOML values.
+
+Everything below is organised as Stage 1 (build the initrd, once, on
+the build host) and Stage 2 (what the initrd does when it boots on
+target hardware).
+
+
+STAGE 1 — Building the installer initrd (build host)
+======================================================
+
+1.1 debootstrap the installer environment (Pass A)
+
+    debootstrap --arch=amd64 --variant=minbase trixie \
+        ./installer-rootfs http://deb.debian.org/debian/
+
+    --variant=minbase keeps Pass A's own footprint down; everything
+    actually needed gets added explicitly in 1.2, same principle
+    plan.txt applies to the target install package list.
+
+1.2 Install install-time tooling into installer-rootfs (chroot, or
+    debootstrap --include=... in one shot). Superset of plan.txt's
+    target package list plus the tools needed to DO the install:
+
+    Networking / fetch:
+      ifupdown or dhcpcd5, iproute2, isc-dhcp-client (or dhcpcd's
+      built-in client — plan.txt's [network] source=from-dhcp implies
+      DHCP only, no static config needed for v1), wget, curl,
+      ca-certificates (TOML/first-boot URLs are http:// in the
+      existing examples, but ca-certificates costs nothing to include
+      and covers any https:// sources later)
+
+    Disk / storage:
+      parted, gdisk (sgdisk is more scriptable than parted for GPT;
+      pick one and use it consistently — recommend gdisk/sgdisk since
+      Proxmox's own installer uses it), dosfstools (mkfs.fat for the
+      ESP), zfsutils-linux, zfs-dkms OR the matching prebuilt zfs
+      kernel module for the installer's own kernel (see Risk 1 below),
+      util-linux, e2fsprogs, kpartx (bind refresh after partition
+      table writes)
+
+    Bootstrap-the-target:
+      debootstrap itself (it's a package, needs to exist inside the
+      initrd to run Pass B), debian-archive-keyring, gnupg (needed to
+      add the Proxmox repo key inside the target chroot in Stage 2)
+
+    Runtime:
+      python3 (stdlib tomllib — Python 3.11+; confirm Trixie's default
+      python3 is >=3.11 before relying on tomllib instead of a
+      third-party toml library — verify against Trixie's actual
+      python3 package version at build time, don't assume)
+      openssh-client (optional, useful for debugging into a running
+      installer over the network)
+
+    Do NOT install: linux-image-* inside installer-rootfs as a normal
+    apt dependency chain implies — the kernel that PAIRS with this
+    initrd is a deliberate, single choice (1.4), not "whatever apt
+    pulls in as a dependency of some other package."
+
+1.3 Write the installer application into installer-rootfs
+
+    This is plan.txt's installer/ Python package (main.py, config.py,
+    storage/, os/, proxmox/, boot/, firstboot/), placed at e.g.
+    /opt/projekt-lods/ inside installer-rootfs. No change to that
+    design from plan.txt — it now runs as the initrd's payload instead
+    of "on a running host."
+
+1.4 PID 1: systemd, not a hand-rolled /init script
+
+    REVISED after the first real build: an initial hand-rolled shell
+    /init (mount proc/sys/dev, exec main.py directly) shipped and
+    booted, but never exported PATH before exec'ing main.py. Python's
+    subprocess falls back to os.defpath ("/bin:/usr/bin") when PATH is
+    unset, and dhcpcd lives in /usr/sbin — outside that fallback — so
+    the network-bring-up subprocess call failed to exec, surfacing as
+    a Python traceback pointing into subprocess.py's child-exec path.
+    Robert's call: stop hand-rolling this and just use systemd as PID 1
+    — it sets a correct $PATH for every service it starts, which fixes
+    that whole bug class outright, and is what build-installer-initrd.sh
+    now does:
+
+      - /init is a symlink to /sbin/init (which systemd-sysv provides,
+        resolving to the real systemd binary) — the kernel execs /init
+        directly at initramfs boot; there is still no switch_root
+        anywhere in this flow, since this cpio IS the only root the
+        environment ever has. Stage 2 still ends with a plain reboot
+        once the target disk is provisioned, exactly as before.
+      - Networking is systemd-networkd (DHCP=yes on en*/eth*), not a
+        subprocess call to dhcpcd. lods-installer.service is
+        After=network-online.target/Wants=network-online.target, so
+        main.py only ever runs once a network-online.target provider
+        (systemd-networkd-wait-online) confirms an interface is up.
+      - main.py runs as a oneshot systemd unit (RemainAfterExit=yes,
+        StandardOutput/Error=journal+console) instead of being exec'd
+        directly by /init. Its own subprocess calls (curl) inherit
+        systemd's sane default $PATH, not Python's bare os.defpath.
+      - agetty --autologin root drop-ins on both getty@tty1 and
+        serial-getty@ttyS0 give a real login shell with working job
+        control on either console type, and journalctl -u
+        lods-installer --no-pager pulls full crash output regardless
+        of console scrollback limits — both were missing with the
+        hand-rolled /init, which just exec'd bash into whatever fds
+        /init happened to have open, with no controlling tty and no
+        persistent logging.
+      - /etc/machine-id is truncated empty at build time so systemd
+        generates a fresh transient id per boot rather than baking one
+        fixed id into every PXE-booted instance.
+
+    This is a genuine, confirmed preference for this project, not just
+    a one-off fix — see [[feedback_systemd_over_handrolled_init]] in
+    memory.
+
+1.5 Extract the kernel to pair with this initrd
+
+    Install exactly one linux-image package into installer-rootfs
+    (matching whichever kernel plan.txt's target installs, or a fixed
+    known-good version — this is a build-time choice, pin it), then
+    copy installer-rootfs/boot/vmlinuz-<version> out as the PXE kernel.
+    This guarantees the zfs.ko module baked into installer-rootfs
+    matches the kernel actually booted — see Risk 1.
+
+1.6 Pack installer-rootfs into the initrd image
+
+    ( cd installer-rootfs && find . -print0 \
+        | cpio --null -o -H newc | gzip -9 ) > installer-initrd.img
+
+    Full-rootfs cpio, no squashfs layer, per the confirmed design
+    choice — everything lives in a tmpfs-backed RAM copy for the
+    duration of the install. See Risk 2 for the size/RAM tradeoff this
+    implies and when to revisit it.
+
+1.7 Publish for PXE/iPXE
+
+    Host installer-initrd.img + vmlinuz-<version> on the existing
+    TFTP/HTTP boot infrastructure (plan.txt: "PXE/iPXE boot environment
+    already exists"). Confirmed from a real answer file (VRK-answer.toml,
+    Edinburgh site) that this is a live, multi-site estate, not a single
+    fixed URL:
+
+      - menu.ipxe already does gateway-based site detection (an `iseq`
+        branch) that sets BOTH ${site-prefix} and ${boot-url} together.
+      - Per-site answer files are named <SITE-CODE>-answer.toml (e.g.
+        VRK-answer.toml, FRD-answer.toml for Fredericia Havn), served
+        from bootstrap/web/proxmox/ on whichever provisioning server
+        answers the gateway check.
+      - The existing convention menu.ipxe already uses is to request
+        ${boot-url}/proxmox/${site-prefix}-answer.toml — TOML has no
+        conditionals, so this per-site resolution happens in iPXE, not
+        in the TOML file itself.
+
+    So toml_url must NOT be a static per-build value (corrected from an
+    earlier draft of this plan) — the iPXE menu entry should pass the
+    already-resolved variables through unchanged:
+
+      kernel http://${boot-url}/lods/vmlinuz-<version>
+      initrd http://${boot-url}/lods/installer-initrd.img
+      imgargs vmlinuz-<version> toml_url=${boot-url}/proxmox/${site-prefix}-answer.toml
+      boot
+
+    main.py's job (2.3-2.4) is unchanged either way — it only ever sees
+    the final resolved toml_url= value on /proc/cmdline and doesn't need
+    to know site-prefix/boot-url exist; all the per-site logic stays in
+    menu.ipxe, exactly as it already does for first-boot.sh's URL.
+
+    late_command.sh sits alongside menu.ipxe in the existing hook chain
+    and is presumed to be the current (pre-projekt-lods) equivalent of
+    some of Stage 2's logic — not yet read. Worth reviewing before
+    implementation in case it already encodes site-specific disk/network
+    quirks that plan.txt's generic flow doesn't yet account for.
+
+
+STAGE 2 — What happens when the initrd boots on target hardware
+==================================================================
+
+Sequence (maps directly onto plan.txt's "Installer Execution Flow" —
+this section only adds where each step's inputs/tools come from):
+
+  2.1  /init (1.4) mounts proc/sys/dev, starts udev, execs main.py
+  2.2  main.py brings up the network interface via DHCP
+       (plan.txt [network] source="from-dhcp")
+  2.3  main.py reads /proc/cmdline, extracts toml_url=
+  2.4  fetch TOML: curl -fsSL "$toml_url" -o /run/answer.toml
+       (curl preferred for scripting; wget kept in the image as a
+       fallback per Robert's explicit ask — both cost ~1MB combined,
+       no reason to drop either)
+  2.5  Python: tomllib.load() the fetched file — parsed DIRECTLY per
+       plan.txt ("The installer should not convert this. It should
+       parse this directly"), no intermediate schema translation
+  2.6  validate config (required keys present, disk-list resolvable,
+       filesystem == "zfs" etc.)
+  2.7  hardware detection + validation against [disk-setup].disk-list,
+       log detected disks per plan.txt's Hardware Detection section
+  2.8  confirm-wipe gate: interactive prompt unless --unattended /
+       PXE-implied unattended mode (plan.txt Safety Features)
+  2.9  partition both disks: GPT, EFI + BIOS-boot + ZFS partitions per
+       plan.txt's layout (sgdisk, scripted — this is the article's
+       parted step, adapted: no swap partition, ZFS partition instead
+       of ext4)
+  2.10 zpool create rpool mirror <part3-disk1> <part3-disk2> with
+       ashift=12, compression=lz4, atime=off, xattr=sa, acltype=posixacl
+       (plan.txt ZFS properties, verbatim)
+       zfs create rpool/ROOT/debian ; set mountpoint=/target manually
+       or via zfs set + zpool set bootfs=rpool/ROOT/debian
+  2.11 debootstrap trixie /target http://deb.debian.org/debian
+       — Pass B. This is the "debootstrap inside the initrd" Robert
+       asked for. Same binary as Pass A, now targeting the real disk.
+  2.12 bind-mount /dev /proc /sys into /target (article's exact
+       pattern), chroot /target
+  2.13 inside chroot: write /etc/hostname, /etc/hosts, /etc/timezone,
+       /etc/fstab (by UUID, per the article's UUID-not-devicepath
+       lesson — matters equally here since disk enumeration order
+       (sda/sdb) is not guaranteed stable across reboots), apt sources
+  2.14 inject root-password-hashed directly into /etc/shadow's root
+       line (it's already a hash — no plaintext ever handled, no
+       chpasswd needed, a straight field replacement)
+  2.15 write root-ssh-keys array to /root/.ssh/authorized_keys
+       (mode 700/600). Confirmed via VRK-answer.toml's inline comment:
+       this is deliberately a SEPARATE, earlier path to root-by-key,
+       independent of and prior to first-boot.sh — Ansible's estate
+       connects as the `ansible` user (ansible.cfg remote_user), which
+       first-boot.sh creates, not the installer. Do not fold ansible-
+       user creation into this step; scope stays root-only here.
+  2.16 set timezone, locale, keyboard from [global]
+  2.17 add Proxmox repo (deb http://download.proxmox.com/debian/pve
+       trixie pve-no-subscription) + its release key via gnupg
+  2.18 apt install proxmox-ve proxmox-default-kernel postfix
+       open-iscsi chrony ; apt remove linux-image-amd64 (plan.txt,
+       verbatim)
+  2.19 regenerate initramfs + grub inside the chroot — this is a
+       NORMAL mkinitramfs run, this time legitimately, because /target
+       now IS a real root filesystem being prepared to boot itself.
+       (This is the point where initramfs-tools is the right tool —
+       just not for the outer installer initrd.)
+  2.20 grub-install to BOTH disks' EFI partitions (mirror redundancy —
+       plan.txt doesn't call this out explicitly but a 2-disk ZFS
+       mirror that can only boot from one disk isn't a mirror for boot
+       purposes; flagging as Risk 3)
+  2.21 write /usr/local/bin/first-boot.sh (fetched from
+       [first-boot].url) + systemd unit, enable it
+  2.22 exit chroot, unmount binds, zpool export rpool (clean export so
+       the target's own initramfs/systemd import it fresh on real
+       boot rather than inheriting the installer's import state)
+  2.23 reboot
+
+
+Open risks / things to verify before or during implementation
+================================================================
+
+Risk 1 — kernel/ZFS module matching
+  zpool create in 2.10 requires zfs.ko loaded and matching the running
+  kernel exactly. Because installer-rootfs, its kernel (1.5), and its
+  zfsutils-linux/zfs module are all built from the SAME chroot in one
+  pass, this is satisfied by construction — but it means the installer
+  kernel version is now a pinned, deliberate release artifact, not
+  "whatever's current in trixie" at initrd-build time vs. boot time.
+  Document the pinned version alongside each initrd build.
+
+Risk 2 — initrd size / RAM footprint
+  Full-rootfs cpio+gzip (installer-rootfs including python3, zfsutils,
+  debootstrap + its cached package data, proxmox tooling) is plausibly
+  several hundred MB uncompressed, all resident in tmpfs/RAM for the
+  duration of the install. Acceptable on Proxmox-class hardware
+  (plan.txt targets hypervisor nodes, not embedded devices), but worth
+  an explicit size measurement after the first real build — if it
+  becomes unwieldy, the fallback (not being built now, per Robert's
+  decision) is a small busybox initrd + squashfs installer-rootfs
+  fetched/mounted separately, the same pattern Proxmox's own ISO and
+  Debian-installer's live variants use.
+
+Risk 3 — dual-disk boot redundancy
+  plan.txt's disk layout gives both disks an EFI + BIOS-boot partition,
+  implying the intent is boot-from-either-disk. 2.20 makes that
+  explicit: grub-install must target both ESPs, not just disk1's.
+
+Risk 4 — hostid consistency
+  ZFS pools record a hostid at creation/import; a mismatched
+  /etc/hostid between the installer environment and the installed
+  system is a common cause of "pool not auto-imported" on first real
+  boot. genhostid or a fixed /etc/hostid must be set inside /target
+  BEFORE the initramfs regeneration in 2.19, not left to whatever the
+  installer initrd's own transient hostid happens to be.
+
+Risk 5 — debootstrap needing network access twice
+  Pass B (2.11) needs outbound HTTP to deb.debian.org (or a local
+  mirror) from inside the booted initrd, in addition to the TOML fetch
+  in 2.4 and the Proxmox repo fetch in 2.18. All three are plain HTTP
+  in the existing examples/infrastructure — consistent with current
+  conventions, but confirm the target network segment actually permits
+  outbound access to deb.debian.org / download.proxmox.com, or that an
+  internal mirror is substituted for both in [network]/config, before
+  relying on it at a remote site.
+
+Risk 6 — TOML transiting the network unauthenticated/in cleartext
+  The fetched TOML contains root-password-hashed and root-ssh-keys.
+  The existing first-boot.url convention is already plain http://, so
+  this isn't a new exposure relative to current practice, but it's
+  worth naming explicitly since this plan is what puts secrets on that
+  same wire for the first time. No action recommended unless Robert
+  wants to shift the whole provisioning URL set to https/internal-only.
+
+
+Development order (delta from plan.txt's existing list)
+==========================================================
+plan.txt already specifies: TOML parser -> logging -> disk detection ->
+partition creation -> ZFS creation -> debootstrap -> chroot config ->
+GRUB -> Proxmox install -> first-boot service -> QEMU integration
+tests. This plan adds ONE step before all of those, since none of them
+can be exercised via PXE until it exists:
+
+  0. Build Stage 1 (installer-rootfs -> initrd + kernel pair) and prove
+     it boots to a shell/prompt in QEMU with:
+       qemu-system-x86_64 -m 4G -kernel vmlinuz-<version> \
+         -initrd installer-initrd.img \
+         -append "console=ttyS0 toml_url=http://10.0.2.2:8000/answer.toml" \
+         -nographic -netdev user,id=n0,hostfwd=... -device virtio-net,netdev=n0
+     BEFORE writing a single line of the disk/ZFS/debootstrap logic —
+     i.e. confirm /init runs, network comes up, and curl can reach a
+     TOML file served from the host, with main.py doing nothing more
+     than logging what it received. This isolates "does the initrd
+     boot at all" from "does the installer logic work," which
+     testing_notes.txt's trial-and-error (parted syntax errors, wrong
+     nbd partition device names, missing chroot package, etc.) suggests
+     is worth separating cleanly rather than debugging both at once.
+
+
+Stage 2 implementation status (2026-07-23)
+============================================
+Step 0 above is done and confirmed booting on real hardware via PXE
+(systemd PID 1, DHCP, TOML fetch+parse all verified working). Stage 2
+itself -- disk detection through reboot -- is now written as a real
+Python package at installer/ (main.py + config.py + logger.py +
+storage/{detect,partition,zfs}.py + osutil/{chroot,debootstrap}.py +
+proxmox/{repository,packages}.py + boot/grub.py + firstboot/systemd.py),
+copied into the image verbatim by build-installer-initrd.sh and run as
+lods-installer.service. It has NOT yet been run against real target
+hardware -- byte-compiled and import-smoke-tested only. Treat it as
+untested until a real PXE run confirms it end-to-end.
+
+One structural deviation from this document's earlier layout: plan.txt's
+own proposed installer/os/ subpackage is renamed to installer/osutil/.
+Reason: main.py's own directory lands at the front of sys.path when run
+as a script, so a subpackage literally named os/ sitting next to it
+would shadow the real stdlib os module for the entire process -- a
+silent, serious bug, not a naming preference.
+
+Corrections made against the verified upstream Proxmox process
+(pve.proxmox.com/wiki/Install_Proxmox_VE_on_Debian_13_Trixie, fetched
+2026-07-23 -- this document's earlier draft of the Proxmox install step
+was written from general knowledge, not checked against this page, and
+was wrong in several specifics):
+
+  - Repo format is deb822 (/etc/apt/sources.list.d/pve-install-repo.sources,
+    Types:/URIs:/Suites:/Components:/Signed-By: fields), NOT the classic
+    one-line `deb http://download.proxmox.com/debian/pve trixie
+    pve-no-subscription` this document originally specified in section
+    2.17. proxmox/repository.py implements the deb822 form.
+  - The repo signing key is fetched from
+    https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg
+    to /usr/share/keyrings/proxmox-archive-keyring.gpg -- not apt-key,
+    not a bare `gnupg`-only assumption. proxmox/repository.py also checks
+    the fetched key's SHA256 against the value published on that wiki
+    page (136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45)
+    and hard-aborts on mismatch rather than trusting an unverified key.
+  - `apt remove os-prober` is part of the verified upstream sequence and
+    was missing from this document entirely -- proxmox/packages.py now
+    includes it.
+  - Upstream's sequence is: full-upgrade -> install proxmox-default-kernel
+    -> REBOOT into it -> install proxmox-ve/postfix/open-iscsi/chrony ->
+    remove the Debian kernel -> update-grub. There is no live system to
+    reboot mid-chroot here, so proxmox/packages.py runs the same package
+    operations back-to-back without an intermediate reboot, and
+    boot/grub.py finalises the initramfs/GRUB regeneration exactly once,
+    at the very end, after every package change has already settled --
+    functionally equivalent, adapted for a chroot-based build rather than
+    a live running system.
+  - Proxmox requires the FQDN to resolve to a non-loopback address in
+    /etc/hosts (explicitly called out on the wiki page) -- not just "an
+    /etc/hosts entry" as this document's section 2.13 vaguely put it.
+    osutil/chroot.py's write_hosts() binds the FQDN to this installer
+    environment's own current DHCP-assigned address (the best available
+    signal at install time of what the target's address will be).
+
+Not yet implemented / deliberately deferred:
+  - TOML's [network] source="from-dhcp" is the only supported value
+    (config.py validates this implicitly by not reading any other network
+    config); static IP configuration isn't wired up.
+  - config.py only accepts disk-setup.filesystem="zfs" and
+    zfs.raid="raid1" with exactly 2 disks -- matches plan.txt's stated v1
+    scope ("Future Extensions: RAIDZ, single disk installs" not yet
+    built), and fails loudly rather than silently on anything else.
+  - No QEMU integration test harness yet (plan.txt's Phase 1-4 testing
+    strategy, development-order item 11) -- Stage 2 so far has only been
+    reasoned about and smoke-tested for import/syntax correctness, not
+    run.
+
+First real end-to-end run (2026-07-24, 2x40GiB VMware VM disks)
+==================================================================
+Disk detection, sgdisk partitioning of both disks, ESP formatting, ZFS
+mirror creation (confirmed ONLINE, no errors), the target debootstrap
+pass, chroot bind-mounts, hostname/hosts (using the real DHCP address and
+the TOML's actual fqdn), and timezone configuration all worked correctly
+on the first attempt, against real block devices, no changes needed.
+
+Failed at write_locale(): `chroot: failed to run command 'locale-gen':
+No such file or directory` (exit 127). Root cause: a plain `debootstrap
+trixie /target ...` does not install the `locales` package -- nothing
+provides locale-gen until it's installed explicitly. Fixed in
+osutil/chroot.py by installing `locales` before calling locale-gen.
+
+Swept for the same mistake elsewhere per the "found one, check for more"
+rule, before it could bite on the next run instead of being caught here:
+write_keyboard() had the identical unverified assumption about
+keyboard-configuration being present (and was silently swallowing the
+failure via check=False, rather than fixing it) -- now installs the
+package explicitly and no longer masks a real failure. boot/grub.py's
+zgenhostid/grub-install calls assume zfsutils-linux/grub-pc/
+grub-efi-amd64 are present -- plausibly true via proxmox-ve's own
+Depends:, but that was never actually verified, so it's now an explicit
+`apt-get install` rather than an assumed transitive dependency.
+
+Not yet run past this point -- everything from Proxmox repo/package
+install onward (2.17-2.23) remains unverified against real hardware.
+
+Second round (2026-07-24): found a second real bug the same way -- every
+apt-get call inside Chroot.run() except the original proxmox-ve one was
+missing DEBIAN_FRONTEND=noninteractive, and keyboard-configuration's
+postinst tries to draw an interactive whiptail dialog, which has nowhere
+to go and stalls the whole install with no crash and no log output
+(confirmed via /proc/<pid>/task/<pid>/children being empty and fd 1/2
+pointing at journald's stdout-capture socket -- consistent with the
+writer blocking behind a congested socket rather than a literal blocked
+read on stdin, since stdin was /dev/null). Fixed by making
+Chroot.run() itself always inject DEBIAN_FRONTEND=noninteractive (one
+fix point, not one per call site, so this can't recur when the next
+apt-get call gets added).
+
+Also split the interactive keyboard-layout picker out of getty@tty1's
+ExecStartPre into its own lods-keyboard-setup.service (Before=both
+getty@tty1.service and lods-installer.service, TTYPath=/dev/tty1) --
+running it as an ExecStartPre had no ordering relationship to
+lods-installer.service at all, so the picker's whiptail dialog and the
+installer's own scrolling console output fought over the same tty
+simultaneously.
+
+Third round, same day: with the DEBIAN_FRONTEND fix in place, a run got
+all the way through Proxmox repo/key verification, full-upgrade,
+proxmox-default-kernel, proxmox-ve+postfix+open-iscsi+chrony, generic
+kernel removal, and os-prober removal -- confirming the entire Proxmox
+package stage 2.17-2.18 works end to end for the first time. Failed at
+boot/grub.py's `apt-get install zfsutils-linux grub-pc grub-efi-amd64`,
+exit 100. Root cause not yet independently confirmed from the raw apt
+error text (the custom install.log only captures what's explicitly
+logged via the Python logger, not passthrough subprocess stdout/stderr --
+that only shows up in journalctl, which wasn't captured for this run) --
+but grub-pc's postinst asking an unanswerable debconf question
+(grub-pc/install_devices, which disks to install the legacy MBR
+bootloader to) with no preseeded default is a well-established, specific
+cause for exactly this failure mode, and is a genuinely required step
+for any automated grub-pc install regardless. Fixed by preseeding
+grub-pc/install_devices with the target disk list via
+debconf-set-selections before installing.
+
+Fourth round, same day: re-running with the preseed fix reached much
+further -- through the full proxmox-ve install (688 packages), generic
+kernel + os-prober removal -- then failed at exactly the same apt-get
+line with the SAME exit 100, revealing the preseed wasn't the actual
+problem. The real cause, from the actual apt error text this time:
+grub-pc and grub-efi-amd64 hard-Conflict with each other in Debian's
+packaging (confirmed: "grub-efi-amd64 : Conflicts: grub-pc but ... is
+to be installed" / "grub-pc : Conflicts: grub-efi-amd64"). Requesting
+both together, as this file originally did on the theory of "install
+both bootloaders for redundancy," is not a preseed problem, not a
+missing-package problem -- it's asking apt to do something structurally
+impossible.
+
+This also surfaced that proxmox-ve's own dependency chain had already
+installed grub-pc automatically well before this code ran (confirmed in
+the log at the proxmox-ve install step, long before boot/grub.py
+executes) -- via an unconstrained "grub-pc | grub-efi-amd64" Depends:
+alternative that apt's solver satisfies without ever inspecting real
+firmware. Whichever one it happens to land on is not guaranteed to match
+the actual machine's boot mode.
+
+Corrected design (a genuine design fix, not just a bug fix): a single
+machine only ever boots in one firmware mode, so "install both
+bootloaders for redundancy" was the wrong framing from the start. The
+real redundancy requirement is both disks bootable in whichever ONE
+mode this hardware actually uses. boot/grub.py now detects UEFI vs BIOS
+via os.path.exists("/sys/firmware/efi") on the running installer
+environment itself (which reflects real firmware, since it's booted on
+the same machine as the target), installs only the matching grub
+package (letting apt remove the mismatched one automatically if
+proxmox-ve already pulled it in), and only runs grub-install for that
+one target across both disks.
+
+Fifth round, same day: rebuilt with the firmware-detection fix, reached
+grub-install itself for the first time (confirms the whole flow through
+proxmox-ve, kernel/os-prober removal, and the grub package conflict fix
+all work correctly on real disks). grub-install --target=i386-pc failed
+with a real, specific, non-generic error this time (obtained via
+journalctl, not guessed): "grub-install.real: error: unknown
+filesystem." Root cause, matching a well-documented ZFS-root install
+gotcha (the same one covered in OpenZFS's own Root-on-ZFS install
+guides): zpool create -R <altroot> -- exactly how storage/zfs.py mounts
+the pool under /target -- sets that pool's cachefile property to none
+automatically (documented ZFS behaviour). No /etc/zfs/zpool.cache ever
+got written anywhere, so grub-probe (called internally by grub-install,
+running inside the chroot) had nothing to read to identify the ZFS pool
+underlying "/". Fixed in boot/grub.py: explicitly zpool set
+cachefile=/etc/zfs/zpool.cache (written in the outer install
+environment, since the command isn't chrooted), then copy that file
+into the target's /etc/zfs/ before grub-install runs. The cachefile
+property is permanent on the pool, so this same file is also what the
+installed system's own zfs-import-cache.service (already enabled
+earlier in the flow) will use on every real boot going forward -- no
+special handling needed after the final zpool export.
+
+Also caught proactively while in this code (not yet observed as a
+failure, but update-initramfs had already run just before the
+grub-install crash, using only zfsutils-linux -- no zfs-initramfs): the
+initramfs-tools hook that actually embeds ZFS-root boot support into the
+generated initrd comes from the zfs-initramfs package specifically, not
+zfsutils-linux (userspace tools only). Without it, update-initramfs
+would silently produce an initrd that can't import/mount the root pool
+at the real first boot at all -- a failure that would only surface much
+later, on hardware disconnected from this debugging session, with a far
+worse diagnostic experience (kernel panic on the *installed* system, not
+the installer). Added zfs-initramfs to the same apt-get install line.
+Confirmed real, correctly-named package from testing_notes.txt's very
+first debootstrap log (trixie/contrib).
+
+Not yet re-run to confirm either fix past this point.
+
+Sixth round, same day: rebuilt with both prior fixes (cachefile copy,
+zfs-initramfs) applied -- same exact "unknown filesystem" error, unchanged.
+This meant the actual cause was neither of those; per Robert's push (a real
+PVE install from the official ISO handles the identical TOML fine, so the
+bug had to be in this code's approach, not something inherent to ZFS+GRUB)
+Robert provided direct access to a real, working PVE box for comparison
+rather than continuing to guess from web docs. That data was decisive and
+overturned two of this document's own prior theories in the same sitting:
+
+  - lsblk showed only 3 partitions per disk (bios_boot/ESP/zfs) -- ruling
+    out "add a dedicated ext4 /boot partition" (which this document had
+    just proposed and Robert had approved, not yet implemented).
+  - `zpool get compatibility rpool` -> off, with the full/default modern
+    feature set active -- ruling out "restrict zpool features for GRUB
+    compatibility" as well.
+  - `proxmox-boot-tool status` -> "System currently booted with legacy
+    bios" / "<uuid> is configured with: grub" -- and the real system's own
+    /boot/grub/grub.cfg says outright: "This system is booted via
+    proxmox-boot-tool! ... /boot/grub/grub.cfg is NOT read when booting
+    from those disks!" This is the actual mechanism: Proxmox never lets
+    GRUB read the kernel/initrd off the ZFS root at all. proxmox-boot-tool
+    copies the current kernel+initrd onto the ESP itself and writes a
+    self-contained boot config there -- GRUB (or systemd-boot) only ever
+    needs to understand FAT32; the ZFS root is mounted afterward, by the
+    running kernel (which has real zfs.ko), not by the bootloader.
+
+  This also retroactively explains a line that had appeared in every run's
+  log without being understood: "No /etc/kernel/proxmox-boot-uuids found,
+  skipping ESP sync" during proxmox-kernel-helper's postinst -- that was
+  proxmox-boot-tool telling us, every single time, that no ESP had been
+  registered with it.
+
+  boot/grub.py's per-disk grub-install/update-grub dance is replaced with
+  `proxmox-boot-tool format <esp> --force` + `proxmox-boot-tool init <esp>
+  [grub]` per disk (the `grub` argument only passed in legacy-BIOS mode;
+  omitted lets it default to systemd-boot in UEFI mode, matching the
+  verified split). The zpool cachefile copy and zfs-initramfs additions
+  from the two previous rounds are kept -- not the actual fix, but
+  proxmox-boot-tool's own internal grub-mkconfig call still needs the
+  cachefile to resolve root=ZFS=... for the cmdline it writes onto the ESP,
+  and zfs-initramfs is still required for the initrd itself regardless of
+  which tool manages the bootloader.
+
+  Same real system also showed /etc/fstab has no /boot/efi entry at all --
+  proxmox-boot-tool mounts each ESP itself only when it needs to
+  format/init/refresh it, not permanently. osutil/chroot.py's
+  write_fstab() previously added a persistent UUID-based /boot/efi mount;
+  removed to match the real convention (now writes only the standard
+  `proc /proc proc defaults 0 0` line, same as the reference system's
+  fstab). Its `disks` parameter and the now-unused `_blkid_uuid()` helper
+  were removed along with it.
+
+Not yet re-run to confirm.
+
+Seventh round, same day: proxmox-boot-tool format ran successfully for the
+first time, but the very next command, init, failed: "E: '/dev/sda2' has
+wrong partition type" -- immediately after format itself had just set that
+exact partition to the correct ESP type GUID. Root cause visible directly
+in the log: udevadm logged "Running in chroot, ignoring request." right
+after format's internal sgdisk-equivalent call, and sgdisk itself had
+already warned "the kernel is still using the old partition table ... run
+partprobe(8)". format's own internal partition-table refresh doesn't take
+effect from inside a chroot -- the exact same class of issue
+storage/partition.py already works around after its own sgdisk calls (a
+plain in-chroot udevadm settle is a no-op; confirmed, not assumed, from
+this log). Fixed by adding the same partprobe + udevadm settle + brief
+sleep, run from outside the chroot, between format and init in
+boot/grub.py.
+
+Also: "setupcon is missing. Please install the 'console-setup' package"
+during update-initramfs -- console-setup was never installed into the
+target (only into the installer's own initrd rootfs, a separate thing).
+Added to the same apt-get install line as zfsutils-linux/zfs-initramfs/
+grub_pkg.
+
+Not yet re-run to confirm either fix.
+
+Eighth round, same day: the partprobe/udevadm-settle fix from the previous
+round genuinely ran (log timing lines up with its 1s sleep), and updated
+the real, outer /run/udev/data/ correctly -- but proxmox-boot-tool init
+still saw the exact same blank PARTTYPE/UUID query result as before.
+Root cause: Chroot's MOUNTS tuple never included /run. Every chroot.run()
+call -- including proxmox-boot-tool's own internal partition queries --
+was reading a separate, empty /target/run, entirely disconnected from the
+live udev database the outer fix had just correctly refreshed. Fixed by
+bind-mounting /run into the chroot alongside proc/sys/dev/dev-pts, in
+Chroot.__enter__ (osutil/chroot.py); __exit__ already unmounts generically
+off the MOUNTS tuple, so no separate change needed there. udevadm itself
+still refuses to do anything when invoked *from inside* the chroot (a
+separate, deliberate safety check this doesn't touch) -- but reading
+already-updated database files under /run doesn't need that, it only
+needed the same /run visible in both places.
+
+Not yet re-run to confirm.
+
+Ninth round (2026-07-25): first full end-to-end success -- installer
+completed, reboot landed on a real, working Proxmox install for the first
+time. first-boot.service failed there, tracing back to a genuine missing
+feature rather than a bug: nothing anywhere in this codebase ever wrote
+target network configuration, despite config.py requiring
+[network].source to be present. Confirmed on the real system: /etc/network/
+interfaces had the real NIC as "iface ens32 inet manual" (Proxmox's own
+template for an interface awaiting explicit config, e.g. as a bridge
+port) -- not brought up by DHCP at all -- matching a warning from
+ifupdown2's own postinst, visible even earlier in this same install's log
+and not connected to this cause at the time: "No 'iface lo' definition
+found" / "No 'auto lo' statement found in /etc/network/interfaces".
+
+Fixed: config.py now validates network.source == "from-dhcp" (the only
+value plan.txt scopes for v1), matching the existing pattern for disk-
+setup.filesystem/zfs.raid. New osutil/chroot.py:write_network() enumerates
+real interfaces from /sys/class/net (reflects the actual host, since /sys
+is bind-mounted into the chroot) excluding lo, and writes a plain
+auto+dhcp stanza per interface. Wired into main.py's chroot-config
+sequence alongside write_hostname/write_hosts.
+
+Also from the same real-system session:
+  - Repeated login warning "setlocale: LC_ALL: cannot change locale
+    (en_US.UTF-8): No such file or directory" -- almost certainly the
+    connecting client's own LC_* env vars (e.g. via SSH) being forwarded
+    and finding nothing generated to satisfy them, since only the
+    TOML-derived locale (en_GB.UTF-8 for country=gb) was ever generated.
+    write_locale() now also generates en_US.UTF-8 alongside the primary
+    locale regardless of country, without changing what LANG itself
+    defaults to.
+  - vim-tiny and nano added to proxmox/packages.py's install list --
+    --variant=minbase (added two rounds ago to cut install time) strips
+    every editor out along with everything else not strictly required,
+    and there wasn't one on the box at all.
+
+Deferred, not implemented now (Robert's call, explicitly not urgent):
+do a fresh install from the official Proxmox ISO on equivalent hardware
+and diff its installed package list against this installer's own
+resulting package list, to catch any other gaps of the same kind (missing
+editors was one; there could be others) before they're each discovered
+one at a time on a real box.
+
+Correction, same day: the first write_network() wholesale-overwrote
+/etc/network/interfaces, discarding proxmox-ve's own "autogenerated ...
+PVE will preserve these directives" header and structure, when Robert had
+explicitly asked for a one-line-style substitution (manual -> dhcp) on
+the existing file. It was also called in the wrong place -- before
+packages.install(), i.e. before proxmox-ve's own postinst has even
+generated that file. Fixed: write_network() now reads the existing file
+and edits only the "inet manual" lines for real interfaces in place
+(adding "auto <iface>" only if missing, since ifupdown2 needs it to
+activate the interface at boot at all), leaving everything else
+byte-for-byte untouched; moved to run after packages.install() in
+main.py. Verified directly against the real file content from the
+ninth-round session (header, comments, and the lo stanza all confirmed
+unchanged; only ens32's line actually changes) rather than just asserted.
+
+Not yet re-run to confirm this round's fixes.
+
+Tenth round (2026-07-25): a fresh rebuild (223MB, down from the original
+683MB across all the size fixes so far) auto-installed successfully again,
+but the network-interfaces/first-boot issue recurred -- not yet
+root-caused; Robert's plan is to reinstall once more and inspect /target
+directly afterward rather than guess further from journal excerpts alone.
+
+Separately, added real debug-access infrastructure to the installer image
+itself (build-installer-initrd.sh), per Robert's explicit direction:
+  - Removed the interactive keyboard-layout picker (lods-keyboard-setup.
+    service) entirely -- every real deployment is unattended over PXE, so
+    a prompt requiring physical interaction has no business blocking boot
+    by default. README.md documents the manual fallback (ckbcomp -layout
+    gb | loadkeys -, or dpkg-reconfigure keyboard-configuration) instead.
+  - openssh-server installed and enabled, root:lods set via chpasswd,
+    PermitRootLogin yes + PasswordAuthentication yes via a
+    sshd_config.d drop-in. Deliberately username+password, not a baked-in
+    key: this project is intended to go public, and a private key baked
+    into a publicly-distributed image either leaks an estate-internal
+    credential or is useless to anyone outside that estate. Applies only
+    to the installer environment itself, never the installed target.
+  - Caught proactively while adding sshd, not yet an observed failure:
+    openssh-server's own postinst generates host keys at package-install
+    time, which would otherwise bake identical SSH host keys into every
+    deployed instance. Stripped after install so each real boot generates
+    its own via ssh.service's existing ssh-keygen@ dependency chain.
+  - Random hostname per boot (lods-<8 hex chars>) via a new
+    lods-random-hostname.service, ordered as early as possible
+    (sysinit.target, Before= getty/ssh/lods-installer) since the initrd is
+    the same static image every boot -- has to happen at runtime, not
+    build time, or every instance would share one fixed hostname. Robert
+    noted this is a trivial, previously-solved pattern from another
+    project.
+
+Verified, same round: Robert asked whether dpkg-reconfigure openssh-server
+also needs to run in the build chroot, reasoning sshd can't start without
+it. Checked against a real Debian trixie box rather than assumed:
+  - openssh-server's postinst script (/var/lib/dpkg/info/openssh-server.
+    postinst) contains no ssh-keygen call at all on trixie -- host-key
+    generation has moved out of the package's own postinst and into a
+    dedicated unit, sshd-keygen.service (not ssh-keygen@ as the previous
+    entry above guessed -- corrected here).
+  - sshd-keygen.service: `ConditionFirstBoot=yes`, `ExecStart=ssh-keygen
+    -A`, `Before=ssh.service sshd.service sshd@.service`,
+    `WantedBy=ssh.service sshd.service sshd@.service ssh.socket`.
+    ssh.service itself carries `Wants=sshd-keygen.service` and
+    `After=...sshd-keygen.service...`. So on any boot systemd considers a
+    "first boot", host keys get generated automatically, strictly before
+    ssh.service starts, with no dpkg/debconf step involved.
+  - ConditionFirstBoot is systemd's own determination, keyed off
+    /etc/machine-id being empty/missing at boot -- exactly what line 127
+    of build-installer-initrd.sh already does (`: > machine-id`) to give
+    every deployed instance a fresh transient ID. Combined with stripping
+    the host keys after build (line 177), every real boot already gets:
+    empty machine-id -> ConditionFirstBoot=yes -> sshd-keygen.service
+    runs -> fresh host keys generated -> ssh.service starts. Confirmed
+    end-to-end from real unit files, not inferred.
+  - Conclusion: dpkg-reconfigure openssh-server is not needed and would
+    be actively wrong here -- it would regenerate host keys at build
+    time, which the very next build step deletes anyway, and does
+    nothing to affect the runtime ConditionFirstBoot mechanism that
+    actually matters. No change made to build-installer-initrd.sh.
+
+Root-caused, same day: Robert re-imported rpool read-only (zpool import -R
+/target rpool) after a no-reboot run and pasted the real /target content.
+Confirmed: /etc/network/interfaces held only lo (debootstrap default);
+/etc/network/interfaces.new held Proxmox's real autogenerated header plus
+"iface ens32 inet manual" -- ifupdown2's own postinst (a proxmox-ve
+dependency, triggered inside packages.install()) detects the debootstrap
+default needs migrating to its syntax and stages the result at
+interfaces.new ("saved ... for hot-apply or next reboot") rather than
+writing it live. write_network() was reading only interfaces, finding no
+manual stanza there every single time, logging "nothing to change" and
+silently leaving the ens32 stanza in .new unapplied -- so the real
+interface was never brought up on first real boot, which is also why
+first-boot.sh (After=/Wants=network-online.target, otherwise correctly
+enabled) could never reach its curl fetch. This was the actual root cause
+across all of round nine and ten's recurrences; the targeted-edit
+implementation itself was correct, it was reading the wrong file. Fixed
+in chroot.py's write_network(): if interfaces.new exists, os.replace() it
+over interfaces before reading, then proceed with the existing edit logic
+unchanged. Not yet rebuilt/retested against a real boot.
+
+Confirmed fixed, same day: after applying the write_network() fix
+manually to the real /target (mv interfaces.new -> interfaces, sed the
+manual -> dhcp + auto line) and rebooting off local disk (not PXE, to
+avoid re-triggering the installer against the same disks), the real
+interface got a DHCP lease, first-boot.service completed, and SSH with
+the TOML-injected key worked. First fully confirmed real end-to-end run
+of this project, start to finish. The interfaces.new fix landed in
+osutil/chroot.py earlier the same round; not yet verified via a fresh
+image rebuild (only verified via the manual /target edit) -- next real
+test should be a clean rebuild + reinstall to confirm the packaged fix
+behaves identically to the hand-applied one.

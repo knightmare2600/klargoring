@@ -1,0 +1,484 @@
+Projekt Lods — Automated Debian Trixie + Proxmox VE ZFS Installer
+Project Objective
+
+Build an automated bare-metal installer which replaces the Proxmox ISO installer workflow.
+
+The goal is to create a custom installer which:
+
+boots via PXE/iPXE
+consumes a Proxmox-compatible TOML answer file
+automatically provisions Debian GNU/Linux Trixie
+creates a ZFS root filesystem
+installs Proxmox VE
+configures first boot automation
+produces a fully operational Proxmox node without manual intervention
+
+The design philosophy is:
+
+Do not use Debian Installer partman.
+
+Instead, replicate the architecture used by the Proxmox installer:
+
+prepare disks manually
+create storage manually
+bootstrap Debian using debootstrap
+configure the target system
+install Proxmox packages
+install bootloader
+reboot into the finished system
+Current Environment
+
+Existing infrastructure:
+
+PXE/iPXE boot environment already exists.
+Site-specific provisioning URLs already exist.
+Existing Proxmox answer TOML files exist.
+Existing first-boot scripts exist.
+Existing Ansible automation exists.
+
+The installer must integrate with these.
+
+Input Format
+
+The installer must consume TOML.
+
+Existing format:
+
+[global]
+keyboard = "en-gb"
+country = "gb"
+fqdn = "pve-install.jukebox.internal"
+mailto = "root@jukebox.internal"
+timezone = "Europe/London"
+
+root-password-hashed = "$6$..."
+
+root-ssh-keys = [
+"ssh-rsa AAAA..."
+]
+
+
+[network]
+source = "from-dhcp"
+
+
+[disk-setup]
+filesystem = "zfs"
+zfs.raid = "raid1"
+disk-list = ["sda", "sdb"]
+
+
+[first-boot]
+source = "from-url"
+ordering = "fully-up"
+url = "http://192.168.139.50/proxmox/first-boot.sh"
+
+The installer should not convert this.
+
+It should parse this directly.
+
+Implementation Language
+
+Use:
+
+Python 3
+
+Reasons:
+
+built-in TOML parser (tomllib)
+excellent subprocess handling
+easier testing
+easier future expansion
+
+Avoid implementing this in Bash.
+
+Bash may be used internally for small system operations only.
+
+Repository Layout
+
+Create:
+
+projekt-lods/
+
+├── README.md
+
+├── installer/
+│
+│   ├── main.py
+│   ├── config.py
+│   ├── logger.py
+│
+│   ├── storage/
+│   │   ├── partition.py
+│   │   ├── zfs.py
+│   │
+│   ├── os/
+│   │   ├── debootstrap.py
+│   │   ├── chroot.py
+│   │
+│   ├── proxmox/
+│   │   ├── repository.py
+│   │   ├── packages.py
+│   │
+│   ├── boot/
+│   │   ├── grub.py
+│   │
+│   └── firstboot/
+│       └── systemd.py
+│
+├── examples/
+│   └── answer.toml
+│
+├── tests/
+│
+└── docs/
+Installer Execution Flow
+
+The main program:
+
+installer/main.py
+
+must perform:
+
+load TOML
+
+validate configuration
+
+detect hardware
+
+validate disks
+
+partition disks
+
+create ZFS pool
+
+bootstrap Debian
+
+configure Debian
+
+install kernel
+
+install ZFS support
+
+install bootloader
+
+install Proxmox VE
+
+install first boot service
+
+cleanup
+
+reboot
+Storage Requirements
+
+Initial supported layout:
+
+Two disks:
+
+/dev/sda
+/dev/sdb
+
+Create:
+
+GPT
+
+Disk 1:
+ EFI partition
+ BIOS boot partition
+ ZFS partition
+
+
+Disk 2:
+ EFI partition
+ BIOS boot partition
+ ZFS partition
+
+Create:
+
+rpool
+ |
+ +-- ROOT
+     |
+     +-- debian
+
+ZFS properties:
+
+ashift=12
+
+compression=lz4
+
+atime=off
+
+xattr=sa
+
+acltype=posixacl
+
+Pool:
+
+zpool create rpool mirror disk1 disk2
+Debian Bootstrap
+
+Use:
+
+debootstrap
+
+Target:
+
+/target
+
+Distribution:
+
+Debian Trixie
+
+Mirror:
+
+http://deb.debian.org/debian
+
+Install:
+
+systemd
+
+linux-image-amd64
+
+zfs-initramfs
+
+zfsutils-linux
+
+grub
+
+openssh-server
+
+sudo
+
+chrony
+Target System Configuration
+
+Generate:
+
+/etc/hostname
+
+/etc/hosts
+
+/etc/timezone
+
+/etc/fstab
+
+/etc/apt/sources.list
+
+Configure:
+
+root password
+
+root SSH authorized_keys
+
+timezone
+
+locale
+
+keyboard
+Bootloader
+
+Support:
+
+UEFI first
+
+Install:
+
+grub-install
+
+to EFI partitions.
+
+Generate:
+
+update-grub
+
+Ensure:
+
+ZFS root imports automatically
+Proxmox Installation
+
+After Debian is running in chroot:
+
+Add repository:
+
+deb http://download.proxmox.com/debian/pve trixie pve-no-subscription
+
+Install:
+
+proxmox-ve
+
+proxmox-default-kernel
+
+postfix
+
+open-iscsi
+
+chrony
+
+Remove:
+
+linux-image-amd64
+
+Regenerate:
+
+initramfs
+
+grub
+First Boot Integration
+
+Existing TOML:
+
+[first-boot]
+
+source="from-url"
+
+ordering="fully-up"
+
+url="http://server/path/first-boot.sh"
+
+Create:
+
+/usr/local/bin/first-boot.sh
+
+Download script from URL.
+
+Create:
+
+/etc/systemd/system/first-boot.service
+
+Service:
+
+After=network-online.target
+
+WantedBy=multi-user.target
+
+Enable automatically.
+
+Hardware Detection
+
+Before destroying disks:
+
+Display/log:
+
+Detected disks:
+
+/dev/sda
+ size:
+ model:
+
+/dev/sdb
+ size:
+ model:
+
+Validate:
+
+correct number of disks
+sufficient capacity
+no active mounts
+
+Require explicit confirmation only when running interactively.
+
+PXE mode should assume unattended operation.
+
+Safety Features
+
+Before disk wipe:
+
+Require:
+
+--confirm-wipe
+
+unless:
+
+--unattended
+
+is specified.
+
+Log everything:
+
+/var/log/projekt-lods/install.log
+Testing Strategy
+
+Phase 1:
+
+Run inside QEMU.
+
+Requirements:
+
+two virtual disks
+UEFI boot
+ZFS mirror
+Debian Trixie boots
+
+Phase 2:
+
+Install Proxmox packages.
+
+Phase 3:
+
+Boot resulting VM.
+
+Phase 4:
+
+Test on physical hardware.
+
+Future Extensions
+
+Do not implement initially, but keep architecture ready for:
+
+RAIDZ
+single disk installs
+NVMe detection
+hardware profiles
+site profiles
+Ansible registration
+cluster joining
+Ceph preparation
+Proxmox SDN configuration
+Definition of Done
+
+The project is successful when:
+
+A machine PXE boots.
+
+It downloads:
+
+answer.toml
+
+The installer:
+
+wipes two disks.
+creates ZFS mirror.
+installs Debian Trixie.
+installs Proxmox VE.
+configures SSH.
+enables first boot automation.
+reboots.
+
+After reboot:
+
+https://hostname:8006
+
+shows a working Proxmox VE installation.
+
+Development Order
+
+Implement in this order:
+
+TOML parser.
+Logging framework.
+Disk detection.
+Partition creation.
+ZFS creation.
+debootstrap.
+chroot configuration.
+GRUB installation.
+Proxmox installation.
+First boot service.
+QEMU integration tests.
+
+Do not attempt the entire installer in one step.
+
+Build each stage independently and test before moving on.
+
+This project is intended to become a reusable bare-metal hypervisor provisioning system, not a one-off script. The existing Proxmox answer TOML format should remain the API contract
