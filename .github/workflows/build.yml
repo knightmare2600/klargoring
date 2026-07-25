@@ -1,0 +1,74 @@
+name: Build installer initrd + ISO
+
+# Manual only -- this debootstraps a fresh rootfs and takes several
+# minutes, no reason to run it on every push. build-installer-initrd.sh
+# itself is not modified by this workflow; SUITE is read from the
+# environment (script default: trixie) so this input drives it without
+# touching the script's own logic.
+on:
+  workflow_dispatch:
+    inputs:
+      debian_suite:
+        description: "Debian suite to debootstrap (e.g. trixie, bookworm)"
+        required: true
+        default: "trixie"
+
+permissions:
+  contents: read
+
+jobs:
+  build-initrd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap cpio xz-utils
+
+      - name: Build installer initrd + kernel
+        env:
+          SUITE: ${{ inputs.debian_suite }}
+        run: sudo -E bash build/build-installer-initrd.sh output
+
+      - name: Upload initrd + kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-initrd-${{ inputs.debian_suite }}
+          path: |
+            output/installer-initrd.img
+            output/vmlinuz
+            output/KERNEL_VERSION
+          if-no-files-found: error
+          retention-days: 14
+
+  build-iso:
+    needs: build-initrd
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install grub-mkrescue prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y grub-pc-bin grub-efi-amd64-bin xorriso mtools
+
+      - name: Download initrd + kernel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-initrd-${{ inputs.debian_suite }}
+          path: initrd-output
+
+      - name: Build installer ISO
+        run: bash build/build-installer-iso.sh initrd-output iso-output
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-iso-${{ inputs.debian_suite }}
+          path: iso-output/projekt-lods-installer.iso
+          if-no-files-found: error
+          retention-days: 14

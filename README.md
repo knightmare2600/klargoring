@@ -97,6 +97,12 @@ installer/          the Stage 2 installer, runs inside the booted initrd
 
 build/
   build-installer-initrd.sh   Stage 1: builds the initrd + matching kernel
+  build-installer-iso.sh      wraps that build's output into a bootable ISO
+  grub.cfg                    the ISO's GRUB menu (local/serial console entries)
+
+.github/workflows/
+  build.yml            manual workflow_dispatch: builds the initrd+kernel,
+                        then the ISO, as separate jobs; uploads both
 
 examples/
   answer.toml          generic template -- real per-site files are never
@@ -121,6 +127,28 @@ given output directory:
 
 Each run debootstraps a fresh Trixie rootfs from scratch (a few minutes,
 needs network access to deb.debian.org), so expect it to take a while.
+
+## Building the ISO
+
+For sites/situations where PXE isn't available. Run this *after*
+`build-installer-initrd.sh` — it wraps that build's output, it doesn't
+build the kernel/initrd itself:
+
+```
+bash build/build-installer-iso.sh /path/to/initrd-output-dir /path/to/iso-output-dir
+```
+
+No root needed for this step. Needs `grub-pc-bin`, `grub-efi-amd64-bin`,
+`xorriso`, and `mtools` (`grub-mkrescue`'s own dependencies) on the build
+host. Produces a single hybrid BIOS+UEFI ISO
+(`projekt-lods-installer.iso`) — the same disc image boots on both old
+BIOS hardware and modern UEFI systems.
+
+Both build steps also run as a manually-triggered GitHub Actions workflow
+(`.github/workflows/build.yml`, `workflow_dispatch` only — prompts for
+the target Debian suite, e.g. `trixie`/`bookworm`, then builds the
+initrd+kernel and the ISO as separate jobs, uploading both as workflow
+artifacts).
 
 ## Booting via iPXE
 
@@ -149,6 +177,25 @@ from the existing per-site `${boot-url}/proxmox/${site-prefix}-answer.toml`
 resolution done entirely in iPXE (gateway-based site detection, an `iseq`
 branch setting both `${site-prefix}` and `${boot-url}` together) — never
 hardcode a single site's URL into a shared iPXE menu entry.
+
+## Booting via ISO
+
+Burn/mount `projekt-lods-installer.iso` and boot it. Unlike the iPXE path
+(where `menu.ipxe` already resolves the real `toml_url=` per site), a
+generic ISO can't know that URL in advance — its GRUB menu
+(`build/grub.cfg`) ships two entries, "local console (tty1)" and "serial
+console (ttyS0, 115200n8)", both with a placeholder
+`toml_url=http://CHANGE-ME/answer.toml`.
+
+GRUB's own menu always shows "press `e` to edit, `c` for a command line"
+at the bottom — no whiptail/dialog anywhere in this project. Press `e` on
+whichever console entry matches your setup, replace `CHANGE-ME` with the
+real answer-file URL, then boot (`Ctrl-X` or `F10` in GRUB's editor). If
+you boot without editing it, `curl` simply fails to fetch the placeholder
+and the installer exits cleanly — `confirm-wipe` (baked into both
+entries) also still requires an explicit interactive confirmation before
+any disk is touched regardless, so an un-edited boot can't wipe anything
+by accident.
 
 ### Kernel cmdline options
 
@@ -238,17 +285,9 @@ supported:
 - The initrd currently keeps `dkms`/`zfs-dkms`/build tooling installed
   after building the ZFS kernel module (a further size optimisation not
   yet done, since it risks the module being torn back out).
-
-## Roadmap
-
-Not yet built, next up:
-
-- A bootable ISO of the same kernel/initrd (GRUB2, hybrid BIOS+UEFI),
-  for sites/situations where PXE isn't available — separate menu entries
-  for serial console vs. local (tty1) console, both showing the editable
-  cmdline the same way the stock Proxmox ISO's advanced options do. No
-  whiptail/dialog prompting.
-- A manually-triggered (`workflow_dispatch`) GitHub Actions workflow that
-  runs `build-installer-initrd.sh` unmodified, prompting for the target
-  Debian suite (trixie/bookworm/etc.), and a second job that builds the
-  ISO from its output.
+- The ISO build (`build/build-installer-iso.sh`, `grub-mkrescue`) hasn't
+  been run to completion yet — this build host is missing `xorriso` and
+  `mtools` (and `grub-efi-amd64-bin`, for the UEFI half of the hybrid
+  ISO). Syntax-checked only; needs a real run (locally with those
+  packages installed, or via the GitHub Actions workflow, which installs
+  them itself) before it's trusted.

@@ -43,7 +43,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-SUITE="trixie"
+SUITE="${SUITE:-trixie}"
 MIRROR="http://deb.debian.org/debian/"
 OUTDIR="$(realpath -m "${1:-$(pwd)/output}")"
 WORKDIR="$(mktemp -d /var/tmp/lods-initrd-build.XXXXXX)"
