@@ -13,10 +13,10 @@ set -euo pipefail
 
 SRCDIR="$(realpath "${1:?usage: $0 <initrd-build-output-dir> [iso-output-dir]}")"
 OUTDIR="$(realpath -m "${2:-$(pwd)/output}")"
-WORKDIR="$(mktemp -d /var/tmp/lods-iso-build.XXXXXX)"
+WORKDIR="$(mktemp -d /var/tmp/klargoring-iso-build.XXXXXX)"
 ISOROOT="$WORKDIR/isoroot"
 
-log() { echo "[lods-iso-build] $*" >&2; }
+log() { echo "[klargoring-iso-build] $*" >&2; }
 
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -32,8 +32,8 @@ cp "$SRCDIR/vmlinuz" "$ISOROOT/boot/vmlinuz"
 cp "$SRCDIR/installer-initrd.img" "$ISOROOT/boot/installer-initrd.img"
 cp "$(dirname "$(realpath "$0")")/grub.cfg" "$ISOROOT/boot/grub/grub.cfg"
 
-log "grub-mkrescue -> $OUTDIR/lods-installer.iso"
-grub-mkrescue -o "$OUTDIR/lods-installer.iso" "$ISOROOT" >&2
+log "grub-mkrescue -> $OUTDIR/klargoring-installer.iso"
+grub-mkrescue -o "$OUTDIR/klargoring-installer.iso" "$ISOROOT" >&2
 
 log "done."
-du -h "$OUTDIR/lods-installer.iso"
+du -h "$OUTDIR/klargoring-installer.iso"

@@ -3,7 +3,7 @@
 #
 # debootstraps a Debian Trixie rootfs, installs install-time tooling into it,
 # runs systemd as PID 1 (/init -> /sbin/init, networking via systemd-networkd)
-# with a oneshot lods-installer.service running ../installer/main.py -- the
+# with a oneshot klargoring-installer.service running ../installer/main.py -- the
 # real Stage 2 installer (disk detection, ZFS mirror, target debootstrap,
 # Proxmox repo+packages, GRUB, first-boot service; see initrd-plan.txt) --
 # then packs the whole rootfs into an xz'd cpio initrd alongside its
@@ -46,10 +46,10 @@ fi
 SUITE="${SUITE:-trixie}"
 MIRROR="http://deb.debian.org/debian/"
 OUTDIR="$(realpath -m "${1:-$(pwd)/output}")"
-WORKDIR="$(mktemp -d /var/tmp/lods-initrd-build.XXXXXX)"
+WORKDIR="$(mktemp -d /var/tmp/klargoring-initrd-build.XXXXXX)"
 ROOTFS="$WORKDIR/rootfs"
 
-log() { echo "[lods-build] $*" >&2; }
+log() { echo "[klargoring-build] $*" >&2; }
 
 cleanup() {
   log "cleaning up bind mounts under $ROOTFS"
@@ -165,7 +165,7 @@ done
 log "setting root:lods and enabling sshd for remote debug access"
 chroot "$ROOTFS" bash -c 'echo "root:lods" | chpasswd'
 mkdir -p "$ROOTFS/etc/ssh/sshd_config.d"
-cat > "$ROOTFS/etc/ssh/sshd_config.d/lods-debug.conf" <<'EOF'
+cat > "$ROOTFS/etc/ssh/sshd_config.d/klargoring-debug.conf" <<'EOF'
 PermitRootLogin yes
 PasswordAuthentication yes
 EOF
@@ -181,23 +181,23 @@ chroot "$ROOTFS" systemctl enable ssh.service
 # time, so this has to happen at runtime, not build time, or every booted
 # instance would share one fixed hostname. Runs as early as possible
 # (sysinit.target, Before= anything that might display/advertise it) so
-# getty/sshd/lods-installer all see the real value, not a placeholder.
-cat > "$ROOTFS/etc/systemd/system/lods-random-hostname.service" <<'EOF'
+# getty/sshd/klargoring-installer all see the real value, not a placeholder.
+cat > "$ROOTFS/etc/systemd/system/klargoring-random-hostname.service" <<'EOF'
 [Unit]
-Description=lods random hostname
-Before=getty@tty1.service serial-getty@ttyS0.service ssh.service lods-installer.service
+Description=klargoring random hostname
+Before=getty@tty1.service serial-getty@ttyS0.service ssh.service klargoring-installer.service
 DefaultDependencies=no
 Conflicts=shutdown.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/sh -c 'h="lods-$(head -c4 /dev/urandom | od -An -tx1 | tr -d " \n")"; echo "$h" > /etc/hostname; hostname "$h"'
+ExecStart=/bin/sh -c 'h="klargoring-$(head -c4 /dev/urandom | od -An -tx1 | tr -d " \n")"; echo "$h" > /etc/hostname; hostname "$h"'
 
 [Install]
 WantedBy=sysinit.target
 EOF
-chroot "$ROOTFS" systemctl enable lods-random-hostname.service
+chroot "$ROOTFS" systemctl enable klargoring-random-hostname.service
 
 # No automatic interactive keyboard-layout picker: every real deployment
 # of this initrd runs unattended over PXE, so a prompt requiring physical
@@ -207,29 +207,29 @@ chroot "$ROOTFS" systemctl enable lods-random-hostname.service
 # keyboard-configuration` interactively) -- kbd is installed for exactly
 # this, on demand, not on every boot.
 
-log "[7/10] installing the lods installer package + service unit"
+log "[7/10] installing the klargoring installer package + service unit"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mkdir -p "$ROOTFS/opt/lods"
-cp -a "$REPO_ROOT/installer" "$ROOTFS/opt/lods/installer"
-chmod +x "$ROOTFS/opt/lods/installer/main.py"
+mkdir -p "$ROOTFS/opt/klargoring"
+cp -a "$REPO_ROOT/installer" "$ROOTFS/opt/klargoring/installer"
+chmod +x "$ROOTFS/opt/klargoring/installer/main.py"
 
-cat > "$ROOTFS/etc/systemd/system/lods-installer.service" <<'EOF'
+cat > "$ROOTFS/etc/systemd/system/klargoring-installer.service" <<'EOF'
 [Unit]
-Description=lods installer
+Description=klargoring installer
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/python3 /opt/lods/installer/main.py
+ExecStart=/usr/bin/python3 /opt/klargoring/installer/main.py
 StandardOutput=journal+console
 StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target
 EOF
-chroot "$ROOTFS" systemctl enable lods-installer.service
+chroot "$ROOTFS" systemctl enable klargoring-installer.service
 
 log "[8/10] extracting matching kernel"
 KERNEL="$(ls "$ROOTFS"/boot/vmlinuz-* | sort -V | tail -1)"

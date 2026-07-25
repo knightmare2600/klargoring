@@ -1,4 +1,4 @@
-# Example lods / Proxmox answer file. This is a generic template
+# Example klargoring / Proxmox answer file. This is a generic template
 # (see plan.txt "Input Format") -- not a real site's file. Real per-site
 # files live on the provisioning server as bootstrap/web/proxmox/<SITE>-answer.toml
 # and are fetched dynamically by menu.ipxe, never checked in here.

@@ -6,13 +6,13 @@ a Proxmox-compatible answer TOML over HTTP, and it debootstraps Debian
 Trixie onto a ZFS mirror, installs Proxmox VE, and reboots into a working
 node — no ISO, no Debian Installer `partman`, no manual intervention.
 
-*Klargøring* (Danish, "readying/preparation") is this repo/project. Some
-internal names here (`lods-installer.service`, `/opt/lods/`, the
-`lods-<hostname>` prefix, the ISO's filename) happen to say "lods" —
-that's just this repo's own build-time naming and is unrelated to
-*Projekt-lods*, a separate OpenWRT-based project (a customised image
-mimicking site FRD's network setup) that lives in its own repo and has
-nothing to do with the Proxmox/ZFS installer built here.
+*Klargøring* (Danish, "readying/preparation") is this repo/project — the
+Proxmox VE/ZFS installer, its build tooling, and its CI. It is unrelated
+to *Projekt-lods*, a separate, pre-existing OpenWRT-based project (a
+customised image mimicking site FRD's network setup) that lives in its
+own repo. Internal names in this repo (`klargoring-installer.service`,
+`/opt/klargoring/`, the `klargoring-<hostname>` prefix, the ISO's
+filename) are named after this project, not that one.
 
 Confirmed working end-to-end on real disks (2026-07-25): PXE boot →
 disk wipe → ZFS mirror → Debian + Proxmox VE install → reboot → DHCP
@@ -83,7 +83,7 @@ installer/          the Stage 2 installer, runs inside the booted initrd
   main.py              orchestrator: load TOML -> ... -> reboot
   config.py            TOML load + validation (parses the TOML directly,
                         no schema translation)
-  logger.py            logs to /var/log/lods/install.log + console
+  logger.py            logs to /var/log/klargoring/install.log + console
   storage/
     detect.py            disk detection/validation (size floor, not mounted)
     partition.py         sgdisk GPT layout: bios_boot + ESP + zfs, per disk
@@ -151,7 +151,7 @@ bash build/build-installer-iso.sh /path/to/initrd-output-dir /path/to/iso-output
 No root needed for this step. Needs `grub-pc-bin`, `grub-efi-amd64-bin`,
 `xorriso`, and `mtools` (`grub-mkrescue`'s own dependencies) on the build
 host. Produces a single hybrid BIOS+UEFI ISO
-(`lods-installer.iso`) — the same disc image boots on both old
+(`klargoring-installer.iso`) — the same disc image boots on both old
 BIOS hardware and modern UEFI systems.
 
 Both build steps also run as a manually-triggered GitHub Actions workflow
@@ -159,9 +159,9 @@ Both build steps also run as a manually-triggered GitHub Actions workflow
 the target Debian suite, e.g. `trixie`/`bookworm`, and optionally a
 release tag). It builds the initrd+kernel and the ISO as separate jobs,
 then publishes all four files (`installer-initrd.img`, `vmlinuz`,
-`KERNEL_VERSION`, `lods-installer.iso`) as assets on a GitHub
-Release — tagged `lods-<date>-<suite>-<run-number>` if you leave the tag
-input blank, or whatever you pass in.
+`KERNEL_VERSION`, `klargoring-installer.iso`) as assets on a GitHub
+Release — tagged `klargoring-<date>-<suite>-<run-number>` if you leave the
+tag input blank, or whatever you pass in.
 
 ## Booting via iPXE
 
@@ -184,6 +184,12 @@ initrd ${boot-url}/proxmox/lods/installer-initrd.img
 boot
 ```
 
+(Quoted verbatim from the real, currently-live `menu.ipxe` — note it
+still labels this entry `:lods`/`proxmox/lods/...` and comments it
+"PROJEKT LODS", from before the Klargøring/lods split was clarified.
+That's a naming collision on the real infrastructure side now, not just
+in this repo; not changed here since it isn't this repo's file to edit.)
+
 `toml_url=` is read straight off `/proc/cmdline` by both the initrd's own
 init sequence and `installer/main.py`. In a multi-site estate this comes
 from the existing per-site `${boot-url}/proxmox/${site-prefix}-answer.toml`
@@ -193,7 +199,7 @@ hardcode a single site's URL into a shared iPXE menu entry.
 
 ## Booting via ISO
 
-Burn/mount `lods-installer.iso` and boot it. Unlike the iPXE path
+Burn/mount `klargoring-installer.iso` and boot it. Unlike the iPXE path
 (where `menu.ipxe` already resolves the real `toml_url=` per site), a
 generic ISO can't know that URL in advance — its GRUB menu
 (`build/grub.cfg`) ships two entries, "local console (tty1)" and "serial
@@ -258,10 +264,10 @@ served menu at all.
   TOML-supplied password hash / SSH key instead). SSH host keys are *not*
   baked in — they're stripped after build time so each real boot
   generates its own fresh ones.
-- The hostname is randomised per boot (`lods-<8 hex chars>`) since the
-  initrd is the same static image every time — expect a different
+- The hostname is randomised per boot (`klargoring-<8 hex chars>`) since
+  the initrd is the same static image every time — expect a different
   prompt/SSH target name on every instance, by design.
-- `systemctl status lods-installer.service` / `journalctl -u lods-installer --no-pager`
+- `systemctl status klargoring-installer.service` / `journalctl -u klargoring-installer --no-pager`
   — the installer's own stdout/stderr, persisted regardless of console
   scrollback limits.
 - `cat /run/answer.toml` — the fetched answer file, if you need to check
@@ -298,9 +304,3 @@ supported:
 - The initrd currently keeps `dkms`/`zfs-dkms`/build tooling installed
   after building the ZFS kernel module (a further size optimisation not
   yet done, since it risks the module being torn back out).
-- The ISO build (`build/build-installer-iso.sh`, `grub-mkrescue`) hasn't
-  been run to completion yet — this build host is missing `xorriso` and
-  `mtools` (and `grub-efi-amd64-bin`, for the UEFI half of the hybrid
-  ISO). Syntax-checked only; needs a real run (locally with those
-  packages installed, or via the GitHub Actions workflow, which installs
-  them itself) before it's trusted.

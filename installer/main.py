@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lods installer entrypoint.
+"""klargoring installer entrypoint.
 
 Flow (plan.txt "Installer Execution Flow" / initrd-plan.txt Stage 2):
   load TOML -> validate -> detect hardware -> confirm-wipe gate ->
@@ -7,7 +7,7 @@ Flow (plan.txt "Installer Execution Flow" / initrd-plan.txt Stage 2):
   configuration -> Proxmox repo+packages -> GRUB+hostid -> first-boot
   service -> export pool -> reboot.
 
-Runs as lods-installer.service (After=network-online.target), so DHCP is
+Runs as klargoring-installer.service (After=network-online.target), so DHCP is
 already up. toml_url= and the safety flags come from /proc/cmdline, same
 place the site-specific iPXE menu.ipxe already puts toml_url for the
 Stage-0 build (see project_provisioning_estate memory / initrd-plan.txt).

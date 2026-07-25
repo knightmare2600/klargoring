@@ -74,7 +74,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installer-iso-${{ inputs.debian_suite }}
-          path: iso-output/lods-installer.iso
+          path: iso-output/klargoring-installer.iso
           if-no-files-found: error
           retention-days: 14
 
@@ -99,7 +99,7 @@ jobs:
         run: |
           TAG="${{ inputs.release_tag }}"
           if [ -z "$TAG" ]; then
-            TAG="lods-$(date -u +%Y%m%d)-${{ inputs.debian_suite }}-${{ github.run_number }}"
+            TAG="klargoring-$(date -u +%Y%m%d)-${{ inputs.debian_suite }}-${{ github.run_number }}"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -112,9 +112,9 @@ jobs:
         run: |
           gh release create "${{ steps.tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
-            --title "lods (${{ inputs.debian_suite }}, build #${{ github.run_number }})" \
+            --title "klargoring (${{ inputs.debian_suite }}, build #${{ github.run_number }})" \
             --notes "Automated build via workflow_dispatch (debian_suite=${{ inputs.debian_suite }})." \
             initrd-output/installer-initrd.img \
             initrd-output/vmlinuz \
             initrd-output/KERNEL_VERSION \
-            iso-output/lods-installer.iso
+            iso-output/klargoring-installer.iso
