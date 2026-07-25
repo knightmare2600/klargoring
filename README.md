@@ -6,13 +6,13 @@ a Proxmox-compatible answer TOML over HTTP, and it debootstraps Debian
 Trixie onto a ZFS mirror, installs Proxmox VE, and reboots into a working
 node — no ISO, no Debian Installer `partman`, no manual intervention.
 
-*Klargøring* (Danish, "readying/preparation") is this repo — the
-build/CI/packaging toolchain. The installer that actually runs inside the
-built image is called **lods** (Danish, "pilot") — it guides a bare
-machine through the install the way a harbour pilot guides a ship in.
-Hence `installer/`, `lods-installer.service`, the `lods-<hostname>`
-naming, and the ISO's filename all say *lods*; the repo/project as a
-whole is *Klargøring*.
+*Klargøring* (Danish, "readying/preparation") is this repo/project. Some
+internal names here (`lods-installer.service`, `/opt/lods/`, the
+`lods-<hostname>` prefix, the ISO's filename) happen to say "lods" —
+that's just this repo's own build-time naming and is unrelated to
+*Projekt-lods*, a separate OpenWRT-based project (a customised image
+mimicking site FRD's network setup) that lives in its own repo and has
+nothing to do with the Proxmox/ZFS installer built here.
 
 Confirmed working end-to-end on real disks (2026-07-25): PXE boot →
 disk wipe → ZFS mirror → Debian + Proxmox VE install → reboot → DHCP
@@ -44,9 +44,9 @@ installer, and the standard workaround in production is exactly what this
 project set out to formalise — PXE-boot a plain Debian install (via
 preseed/FAI), then layer the Proxmox repo and packages on top afterward.
 Klargøring does that same thing, but as a single purpose-built, reusable
-initrd (its installer component is called **lods** — see below) driven by
-the same TOML answer-file contract already used across this estate — one
-PXE boot, one small file, no gigabyte-scale ISO in the loop.
+initrd driven by the same TOML answer-file contract already used across
+this estate — one PXE boot, one small file, no gigabyte-scale ISO in the
+loop.
 
 ## How it works
 
