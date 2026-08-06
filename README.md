@@ -206,30 +206,50 @@ tag input blank, or whatever you pass in.
 
 ## Booting via iPXE
 
-Real production example, from this estate's own `menu.ipxe`:
+Real production example, from this estate's own `menu.ipxe` (updated
+2026-08-06 for arm64 and the Klargøring naming):
 
 ```
 # ===========================================================================
-# PROJEKT LODS
+# PROJEKT klargoring
 # Robert's own hand-rolled live Proxmox installer distro, built separately --
-# NOT the Proxmox-official auto-install ISO path (see "Why this exists"
-# above). Different distro, different mechanism.
+# NOT the Proxmox-official auto-install ISO path that :proxmox-ve's own
+# history (see that section's comment, v2.3-v2.5) already tried via PXE and
+# abandoned after a failed live test. Different distro, different mechanism.
 # Uses ${boot-url}/${site-prefix} like every other entry here rather than a
 # hardcoded IP/site -- ${site-prefix}-answer.toml matches the same per-site
-# answer-file convention already established elsewhere in this menu.
+# answer-file convention already established above (env_edinburgh/
+# env_fredericia set it to VRK/FRD respectively).
+#
+# ARM64 added 2026-08-06 (Robert, following PVE 9.2's own arm64 release --
+# https://pve.proxmox.com/wiki/Roadmap). Branches to two separate labels
+# with fully-literal kernel/initrd paths rather than ${arch}-style variable
+# indirection, to keep this menu's own asset-path resolution simple and
+# unambiguous per architecture.
 # ===========================================================================
-:lods
-iseq ${arch} arm64 && goto noarch-msg ||
-kernel ${boot-url}/proxmox/lods/vmlinuz toml_url=${boot-url}/proxmox/${site-prefix}-answer.toml confirm-wipe no-reboot
-initrd ${boot-url}/proxmox/lods/installer-initrd.img
+:klargoring
+iseq ${arch} arm64 && goto klargoring-arm64 || goto klargoring-amd64
+
+:klargoring-amd64
+kernel ${boot-url}/proxmox/klargoring/amd64/vmlinuz toml_url=${boot-url}/proxmox/${site-prefix}-answer.toml confirm-wipe no-reboot
+initrd ${boot-url}/proxmox/klargoring/amd64/installer-initrd.img
+boot
+
+:klargoring-arm64
+kernel ${boot-url}/proxmox/klargoring/arm64/vmlinuz-arm64 toml_url=${boot-url}/proxmox/${site-prefix}-answer.toml confirm-wipe no-reboot
+initrd ${boot-url}/proxmox/klargoring/arm64/installer-initrd-arm64.img
 boot
 ```
 
-(Quoted verbatim from the real, currently-live `menu.ipxe` — note it
-still labels this entry `:lods`/`proxmox/lods/...` and comments it
-"PROJEKT LODS", from before the Klargøring/lods split was clarified.
-That's a naming collision on the real infrastructure side now, not just
-in this repo; not changed here since it isn't this repo's file to edit.)
+(Quoted verbatim from the real, currently-live `menu.ipxe`, not this
+repo's file to edit. Note the `amd64`/`arm64` filenames aren't symmetric —
+`vmlinuz`/`installer-initrd.img` unsuffixed for amd64,
+`vmlinuz-arm64`/`installer-initrd-arm64.img` for arm64. That's specific to
+how these got named on this web server, not how this repo's own GitHub
+Release publishes them — that release suffixes *both* architectures
+(`vmlinuz-amd64`/`vmlinuz-arm64`, etc., confirmed directly via the GitHub
+API), so whatever copied these onto `bootstrap/web/` evidently renamed the
+amd64 copy but not the arm64 one.)
 
 `toml_url=` is read straight off `/proc/cmdline` by both the initrd's own
 init sequence and `installer/main.py`. In a multi-site estate this comes
