@@ -179,15 +179,16 @@ ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
 EOF
 done
 
-# Remote debug access via sshd, deliberately username+password (root/lods)
-# rather than a baked-in key: this project is intended to go public, and a
-# private key baked into a publicly-distributed image either exposes an
-# estate-internal credential or is useless to anyone outside that estate.
-# A documented, fixed default credential -- for this transient, PXE-booted
-# installer environment only, never the installed target -- works for
-# everyone who has the image, which is the actual point of it being public.
-log "setting root:lods and enabling sshd for remote debug access"
-chroot "$ROOTFS" bash -c 'echo "root:lods" | chpasswd'
+# Remote debug access via sshd, deliberately username+password
+# (root/klargoring) rather than a baked-in key: this project is intended
+# to go public, and a private key baked into a publicly-distributed image
+# either exposes an estate-internal credential or is useless to anyone
+# outside that estate. A documented, fixed default credential -- for this
+# transient, PXE-booted installer environment only, never the installed
+# target -- works for everyone who has the image, which is the actual
+# point of it being public.
+log "setting root:klargoring and enabling sshd for remote debug access"
+chroot "$ROOTFS" bash -c 'echo "root:klargoring" | chpasswd'
 mkdir -p "$ROOTFS/etc/ssh/sshd_config.d"
 cat > "$ROOTFS/etc/ssh/sshd_config.d/klargoring-debug.conf" <<'EOF'
 PermitRootLogin yes

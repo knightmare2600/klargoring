@@ -296,7 +296,7 @@ served menu at all.
   local console (`tty1`) and serial (`ttyS0`) — no interactive prompts of
   any kind block boot, since every real deployment of this initrd runs
   unattended over PXE.
-- Remote access: `ssh root@<hostname-or-ip>`, password `lods`. Deliberately
+- Remote access: `ssh root@<hostname-or-ip>`, password `klargoring`. Deliberately
   username+password rather than a baked-in key — this project is public,
   and a private key baked into a publicly-distributed image either leaks
   an estate-internal credential or is useless to anyone outside that
