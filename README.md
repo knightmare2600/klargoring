@@ -76,6 +76,25 @@ loop.
   TOML-injected key all verified on a real reboot, not just a
   syntax/import check.
 
+## Architectures
+
+`amd64` (the original target, confirmed end-to-end as above) and `arm64`
+(Proxmox VE's own official arm64 support). The two are close to identical
+from this project's point of view — same repos, same package versions,
+same release lifecycle — with one real difference: **arm64 Proxmox hosts
+are UEFI+ACPI only, no legacy BIOS at all**, and device-tree single-board
+computers (Raspberry Pi and similar) aren't supported targets. Since
+`boot/grub.py` already detects UEFI vs. BIOS from the real running
+environment rather than assuming, arm64 just always takes the UEFI branch
+naturally — no separate code path was needed there, only the right
+package names.
+
+Every build script/workflow in this repo takes an `ARCH=amd64|arm64`
+environment variable (default `amd64`, so nothing about the existing
+amd64 workflow changes if you never set it) and writes output into a
+`<ARCH>/` subfolder, so both architectures' artifacts can exist side by
+side without overwriting each other.
+
 ## Repository layout
 
 ```
@@ -125,10 +144,12 @@ tests/
 
 ```
 sudo bash build/build-installer-initrd.sh /path/to/output-dir
+# or, for arm64:
+sudo ARCH=arm64 bash build/build-installer-initrd.sh /path/to/output-dir
 ```
 
-Needs root (debootstrap/chroot/mount all require it). Produces, in the
-given output directory:
+Needs root (debootstrap/chroot/mount all require it). Produces, under
+`<output-dir>/<ARCH>/`:
 
 - `installer-initrd.img` — the packed, xz-compressed initrd
 - `vmlinuz` — the matching kernel (module versions are pinned to this
@@ -137,6 +158,11 @@ given output directory:
 
 Each run debootstraps a fresh Trixie rootfs from scratch (a few minutes,
 needs network access to deb.debian.org), so expect it to take a while.
+Cross-building `ARCH=arm64` on an amd64 host needs `qemu-user-static`
+installed (the script uses `qemu-debootstrap` automatically when the
+requested `ARCH` doesn't match the build host's own architecture) — or
+just build natively on arm64 hardware/a native arm64 runner, which is
+what the GitHub Actions workflow does.
 
 ## Building the ISO
 
@@ -146,21 +172,36 @@ build the kernel/initrd itself:
 
 ```
 bash build/build-installer-iso.sh /path/to/initrd-output-dir /path/to/iso-output-dir
+# or, for arm64:
+ARCH=arm64 bash build/build-installer-iso.sh /path/to/initrd-output-dir /path/to/iso-output-dir
 ```
 
-No root needed for this step. Needs `grub-pc-bin`, `grub-efi-amd64-bin`,
-`xorriso`, and `mtools` (`grub-mkrescue`'s own dependencies) on the build
-host. Produces a single hybrid BIOS+UEFI ISO
-(`klargoring-installer.iso`) — the same disc image boots on both old
-BIOS hardware and modern UEFI systems.
+No root needed for this step. `ARCH` must match whatever
+`build-installer-initrd.sh` was run with, since it reads from the same
+`<ARCH>/` subfolder. Needs `xorriso` and `mtools` either way, plus:
+
+- `amd64`: `grub-pc-bin` + `grub-efi-amd64-bin` — produces a hybrid
+  BIOS+UEFI ISO, boots on both old BIOS hardware and modern UEFI systems.
+- `arm64`: `grub-efi-arm64-bin` only — arm64 Proxmox hosts are UEFI-only,
+  so there's no BIOS half to build. The script checks the right GRUB
+  platform directory is actually installed before running `grub-mkrescue`
+  and fails with the exact package name to install if it's missing,
+  rather than silently producing an ISO that can't boot on that
+  architecture.
+
+Either way, produces `<output-dir>/<ARCH>/klargoring-installer.iso`.
 
 Both build steps also run as a manually-triggered GitHub Actions workflow
 (`.github/workflows/build.yml`, `workflow_dispatch` only — prompts for
 the target Debian suite, e.g. `trixie`/`bookworm`, and optionally a
-release tag). It builds the initrd+kernel and the ISO as separate jobs,
-then publishes all four files (`installer-initrd.img`, `vmlinuz`,
-`KERNEL_VERSION`, `klargoring-installer.iso`) as assets on a GitHub
-Release — tagged `klargoring-<date>-<suite>-<run-number>` if you leave the
+release tag). It builds both architectures as a matrix — arm64 runs on
+GitHub's native `ubuntu-24.04-arm` hosted runner (free for public repos),
+not emulation — then publishes everything as assets on a single GitHub
+Release: `vmlinuz-<arch>`, `installer-initrd-<arch>.img`,
+`KERNEL_VERSION-<arch>`, and `klargoring-installer-<arch>.iso` for each of
+`amd64`/`arm64` (GitHub Releases are a flat namespace, so the arch suffix
+is added at publish time even though the local build output uses folders
+instead). Tagged `klargoring-<date>-<suite>-<run-number>` if you leave the
 tag input blank, or whatever you pass in.
 
 ## Booting via iPXE

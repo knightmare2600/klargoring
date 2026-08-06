@@ -63,7 +63,13 @@ def install(chroot, disks, root_dataset, log):
     # being explicitly requested this time.
     uefi = os.path.exists("/sys/firmware/efi")
     log.info(f"firmware mode detected: {'UEFI' if uefi else 'legacy BIOS'}")
-    grub_pkg = "grub-efi-amd64" if uefi else "grub-pc"
+    # arm64 Proxmox hosts are UEFI+ACPI only (no legacy BIOS at all --
+    # confirmed via Proxmox's own arm64 announcement), so this always takes
+    # the UEFI branch there; the package name still needs the real arch,
+    # same detection approach as osutil/debootstrap.py.
+    arch = subprocess.run(["dpkg", "--print-architecture"], capture_output=True,
+                           text=True, check=True).stdout.strip()
+    grub_pkg = f"grub-efi-{arch}" if uefi else "grub-pc"
 
     # zfs-initramfs (not just zfsutils-linux) provides the initramfs-tools
     # hook that embeds ZFS-root boot support into the generated initrd --

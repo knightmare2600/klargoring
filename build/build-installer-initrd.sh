@@ -1,14 +1,14 @@
 #!/bin/bash
-# Stage 1 build script (see ../initrd-plan.txt, section "STAGE 1").
+# Stage 1 build script.
 #
 # debootstraps a Debian Trixie rootfs, installs install-time tooling into it,
 # runs systemd as PID 1 (/init -> /sbin/init, networking via systemd-networkd)
 # with a oneshot klargoring-installer.service running ../installer/main.py -- the
 # real Stage 2 installer (disk detection, ZFS mirror, target debootstrap,
-# Proxmox repo+packages, GRUB, first-boot service; see initrd-plan.txt) --
-# then packs the whole rootfs into an xz'd cpio initrd alongside its
-# matching kernel. This script just copies installer/ in verbatim; the
-# installer logic itself lives there, not in this build script.
+# Proxmox repo+packages, GRUB, first-boot service) -- then packs the whole
+# rootfs into an xz'd cpio initrd alongside its matching kernel. This script
+# just copies installer/ in verbatim; the installer logic itself lives
+# there, not in this build script.
 #
 # PID 1 is systemd, not a hand-rolled init script: it sets a sane $PATH for
 # every service it starts (the earlier hand-rolled /init didn't, which is why
@@ -20,6 +20,12 @@
 #
 # Must run as root (debootstrap/chroot/mount all require it):
 #   sudo bash build/build-installer-initrd.sh [output-dir]
+#
+# ARCH=amd64|arm64 (env var, default amd64) selects the target architecture.
+# Output lands in <output-dir>/<ARCH>/, so amd64 and arm64 builds never
+# collide. Cross-building (ARCH different from this host's own architecture)
+# needs qemu-user-static installed on the build host -- see the debootstrap
+# step below.
 #
 # Idempotent-ish: each run debootstraps fresh into a new tempdir and only
 # touches the given output directory.
@@ -44,8 +50,11 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 SUITE="${SUITE:-trixie}"
+ARCH="${ARCH:-amd64}"
 MIRROR="http://deb.debian.org/debian/"
-OUTDIR="$(realpath -m "${1:-$(pwd)/output}")"
+# Per-architecture output subfolder -- amd64 and arm64 builds never overwrite
+# each other, and every downstream write below just uses $OUTDIR unchanged.
+OUTDIR="$(realpath -m "${1:-$(pwd)/output}")/$ARCH"
 WORKDIR="$(mktemp -d /var/tmp/klargoring-initrd-build.XXXXXX)"
 ROOTFS="$WORKDIR/rootfs"
 
@@ -64,8 +73,23 @@ trap cleanup EXIT
 mkdir -p "$OUTDIR"
 mkdir -p "$ROOTFS"
 
-log "[1/10] debootstrap $SUITE -> $ROOTFS"
-debootstrap --arch=amd64 --variant=minbase "$SUITE" "$ROOTFS" "$MIRROR"
+# Cross-building for a different architecture than this build host's own
+# needs qemu-user-static's binfmt registration so the target-arch postinst
+# scripts debootstrap runs during its second stage can actually execute.
+# qemu-debootstrap (from the qemu-user-static package) is the standard tool
+# for this -- it's a thin wrapper that copies the right static qemu-*-static
+# binary into the chroot before running the normal second stage. Only used
+# when actually cross-building; a native build uses plain debootstrap.
+HOST_ARCH="$(dpkg --print-architecture)"
+if [ "$ARCH" != "$HOST_ARCH" ]; then
+  log "cross-building $ARCH on a $HOST_ARCH host -- using qemu-debootstrap"
+  DEBOOTSTRAP_CMD="qemu-debootstrap"
+else
+  DEBOOTSTRAP_CMD="debootstrap"
+fi
+
+log "[1/10] $DEBOOTSTRAP_CMD --arch=$ARCH $SUITE -> $ROOTFS"
+"$DEBOOTSTRAP_CMD" --arch="$ARCH" --variant=minbase "$SUITE" "$ROOTFS" "$MIRROR"
 
 log "[2/10] bind-mounting virtual filesystems for chroot package installs"
 mount -t proc proc "$ROOTFS/proc"
@@ -86,7 +110,7 @@ log "[3/10] installing install-time tooling into rootfs"
 chroot "$ROOTFS" apt-get update
 DEBIAN_FRONTEND=noninteractive chroot "$ROOTFS" apt-get install -y --no-install-recommends \
   systemd systemd-sysv systemd-resolved udev dbus \
-  linux-image-amd64 linux-headers-amd64 \
+  "linux-image-$ARCH" "linux-headers-$ARCH" \
   iproute2 iputils-ping \
   curl wget ca-certificates openssh-client openssh-server w3m procps \
   gdisk parted dosfstools util-linux e2fsprogs kpartx \
@@ -97,13 +121,13 @@ DEBIAN_FRONTEND=noninteractive chroot "$ROOTFS" apt-get install -y --no-install-
 
 log "[4/10] verifying zfs kernel module was actually built before stripping headers"
 if ! find "$ROOTFS/lib/modules" -iname 'zfs.ko*' | grep -q .; then
-  echo "error: zfs.ko not found under $ROOTFS/lib/modules -- refusing to strip linux-headers-amd64" >&2
+  echo "error: zfs.ko not found under $ROOTFS/lib/modules -- refusing to strip linux-headers-$ARCH" >&2
   exit 1
 fi
 
 log "[5/10] purging linux-headers-* (build-only, not needed once zfs.ko exists) to shrink the image"
-# linux-headers-amd64 is a thin metapackage -- the actual header files live
-# in versioned packages (linux-headers-<kver>-common, -amd64) that
+# linux-headers-$ARCH is a thin metapackage -- the actual header files live
+# in versioned packages (linux-headers-<kver>-common, -$ARCH) that
 # --autoremove doesn't reliably cascade into removing on its own. Purge
 # every installed linux-headers-* package explicitly instead of guessing.
 HEADER_PKGS="$(chroot "$ROOTFS" dpkg-query -W -f='${Package}\n' 'linux-headers-*' 2>/dev/null || true)"
@@ -111,7 +135,7 @@ if [ -n "$HEADER_PKGS" ]; then
   DEBIAN_FRONTEND=noninteractive chroot "$ROOTFS" apt-get purge -y --autoremove $HEADER_PKGS
 fi
 if ! find "$ROOTFS/lib/modules" -iname 'zfs.ko*' | grep -q .; then
-  echo "error: zfs.ko disappeared after purging linux-headers-amd64 -- aborting, image would boot without ZFS" >&2
+  echo "error: zfs.ko disappeared after purging linux-headers-$ARCH -- aborting, image would boot without ZFS" >&2
   exit 1
 fi
 

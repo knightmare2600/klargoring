@@ -1,10 +1,18 @@
 name: Build installer initrd + ISO
 
 # Manual only -- this debootstraps a fresh rootfs and takes several
-# minutes, no reason to run it on every push. build-installer-initrd.sh
-# itself is not modified by this workflow; SUITE is read from the
-# environment (script default: trixie) so this input drives it without
-# touching the script's own logic.
+# minutes, no reason to run it on every push. build-installer-initrd.sh /
+# build-installer-iso.sh are not modified by this workflow; SUITE/ARCH are
+# read from the environment (script defaults: trixie/amd64) so these
+# inputs drive them without touching the scripts' own logic.
+#
+# Builds both amd64 and arm64 as a matrix. arm64 uses GitHub's native
+# arm64-hosted runner (ubuntu-24.04-arm, free for public repos as of the
+# 2025-01-16 public preview) rather than cross-building under emulation --
+# simpler and faster than qemu-user-static, and this repo is public so the
+# label is available. build-installer-initrd.sh still supports cross-
+# building via qemu-debootstrap on its own (see its comments) for anyone
+# running it outside this workflow on a single amd64 host.
 on:
   workflow_dispatch:
     inputs:
@@ -23,7 +31,15 @@ permissions:
 
 jobs:
   build-initrd:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,22 +52,39 @@ jobs:
       - name: Build installer initrd + kernel
         env:
           SUITE: ${{ inputs.debian_suite }}
+          ARCH: ${{ matrix.arch }}
         run: sudo -E bash build/build-installer-initrd.sh output
 
       - name: Upload initrd + kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: installer-initrd-${{ inputs.debian_suite }}
+          name: installer-initrd-${{ inputs.debian_suite }}-${{ matrix.arch }}
           path: |
-            output/installer-initrd.img
-            output/vmlinuz
-            output/KERNEL_VERSION
+            output/${{ matrix.arch }}/installer-initrd.img
+            output/${{ matrix.arch }}/vmlinuz
+            output/${{ matrix.arch }}/KERNEL_VERSION
           if-no-files-found: error
           retention-days: 14
 
   build-iso:
     needs: build-initrd
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          # arm64 is UEFI-only (no legacy BIOS at all -- confirmed via
+          # Proxmox's own arm64 announcement), so its ISO only needs the
+          # arm64 EFI platform, never grub-pc-bin. Keeping the two
+          # architectures' package lists disjoint also avoids the
+          # cross-contamination caveat noted in build-installer-iso.sh
+          # (grub-mkrescue embeds every GRUB platform it finds installed).
+          - arch: amd64
+            runner: ubuntu-latest
+            grub_pkgs: "grub-pc-bin grub-efi-amd64-bin"
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            grub_pkgs: "grub-efi-arm64-bin"
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,22 +92,24 @@ jobs:
       - name: Install grub-mkrescue prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y grub-pc-bin grub-efi-amd64-bin xorriso mtools
+          sudo apt-get install -y ${{ matrix.grub_pkgs }} xorriso mtools
 
       - name: Download initrd + kernel artifacts
         uses: actions/download-artifact@v4
         with:
-          name: installer-initrd-${{ inputs.debian_suite }}
-          path: initrd-output
+          name: installer-initrd-${{ inputs.debian_suite }}-${{ matrix.arch }}
+          path: initrd-output/${{ matrix.arch }}
 
       - name: Build installer ISO
+        env:
+          ARCH: ${{ matrix.arch }}
         run: bash build/build-installer-iso.sh initrd-output iso-output
 
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
-          name: installer-iso-${{ inputs.debian_suite }}
-          path: iso-output/klargoring-installer.iso
+          name: installer-iso-${{ inputs.debian_suite }}-${{ matrix.arch }}
+          path: iso-output/${{ matrix.arch }}/klargoring-installer.iso
           if-no-files-found: error
           retention-days: 14
 
@@ -82,17 +117,45 @@ jobs:
     needs: [build-initrd, build-iso]
     runs-on: ubuntu-latest
     steps:
-      - name: Download initrd + kernel artifacts
+      - name: Download amd64 initrd + kernel
         uses: actions/download-artifact@v4
         with:
-          name: installer-initrd-${{ inputs.debian_suite }}
-          path: initrd-output
+          name: installer-initrd-${{ inputs.debian_suite }}-amd64
+          path: dl/initrd-amd64
 
-      - name: Download ISO artifact
+      - name: Download arm64 initrd + kernel
         uses: actions/download-artifact@v4
         with:
-          name: installer-iso-${{ inputs.debian_suite }}
-          path: iso-output
+          name: installer-initrd-${{ inputs.debian_suite }}-arm64
+          path: dl/initrd-arm64
+
+      - name: Download amd64 ISO
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-iso-${{ inputs.debian_suite }}-amd64
+          path: dl/iso-amd64
+
+      - name: Download arm64 ISO
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-iso-${{ inputs.debian_suite }}-arm64
+          path: dl/iso-arm64
+
+      # GitHub Releases are a flat asset namespace, and every arch's files
+      # share the same base filename (vmlinuz, installer-initrd.img, ...)
+      # at download time -- they'd collide as release assets without an
+      # explicit arch-suffixed rename first.
+      - name: Rename downloads to arch-suffixed release asset names
+        run: |
+          mkdir -p release-assets
+          cp dl/initrd-amd64/installer-initrd.img release-assets/installer-initrd-amd64.img
+          cp dl/initrd-amd64/vmlinuz               release-assets/vmlinuz-amd64
+          cp dl/initrd-amd64/KERNEL_VERSION         release-assets/KERNEL_VERSION-amd64
+          cp dl/initrd-arm64/installer-initrd.img  release-assets/installer-initrd-arm64.img
+          cp dl/initrd-arm64/vmlinuz               release-assets/vmlinuz-arm64
+          cp dl/initrd-arm64/KERNEL_VERSION         release-assets/KERNEL_VERSION-arm64
+          cp dl/iso-amd64/klargoring-installer.iso release-assets/klargoring-installer-amd64.iso
+          cp dl/iso-arm64/klargoring-installer.iso release-assets/klargoring-installer-arm64.iso
 
       - name: Determine release tag
         id: tag
@@ -105,7 +168,9 @@ jobs:
 
       # gh is preinstalled on GitHub-hosted runners. --repo is passed
       # explicitly so this doesn't need a checkout step just to give gh a
-      # git remote to infer the repo from.
+      # git remote to infer the repo from. Single non-matrix job/single
+      # release-create call deliberately -- if this were a matrix job too,
+      # both arch legs would race to create the same release tag.
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -113,8 +178,5 @@ jobs:
           gh release create "${{ steps.tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
             --title "klargoring (${{ inputs.debian_suite }}, build #${{ github.run_number }})" \
-            --notes "Automated build via workflow_dispatch (debian_suite=${{ inputs.debian_suite }})." \
-            initrd-output/installer-initrd.img \
-            initrd-output/vmlinuz \
-            initrd-output/KERNEL_VERSION \
-            iso-output/klargoring-installer.iso
+            --notes "Automated build via workflow_dispatch (debian_suite=${{ inputs.debian_suite }}). Includes amd64 and arm64." \
+            release-assets/*
